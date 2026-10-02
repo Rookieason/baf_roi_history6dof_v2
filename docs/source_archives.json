@@ -1,0 +1,27 @@
+[
+  {
+    "filename": "baf_pose.zip",
+    "sha256": "60d4b3f0cbe7193228a2ba69469bb00d41d532d24ab646487380cc812381aaf0",
+    "bytes": 63193
+  },
+  {
+    "filename": "roi_baseline-main (2).zip",
+    "sha256": "ea3dc06739ee46572290a507088d418427610f751fd5479a78b09b28161be28d",
+    "bytes": 546847
+  },
+  {
+    "filename": "力行論文(4).pdf",
+    "sha256": "3d328849455ce75ae74ae30cf4dea1bfb01b76dde73855d7ce511867bf754f4d",
+    "bytes": 5095313
+  },
+  {
+    "filename": "data_preparation.zip",
+    "sha256": "584130c51c874a32796c7b31a1c09d5cfcf89e64f7c87ee4630a72dd163483c2",
+    "bytes": 120503
+  },
+  {
+    "filename": "baf_roi_history6dof.zip",
+    "sha256": "dc6e3027b86681aa7670810369195b52562212a172b8b4a270576370e1d29b44",
+    "bytes": 159661
+  }
+]

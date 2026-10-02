@@ -1,0 +1,62 @@
+{
+  "cache_id": "0d0bdbe600d143ae00d2ac6a7275c0d5412a5151b85d3093ae14b253de389bca",
+  "trajectories": 3,
+  "counts": {
+    "train": {
+      "input_windows": 211,
+      "confidence": 209,
+      "all_next": 210,
+      "focused_clean": 98,
+      "explorer_clean": 108,
+      "focused": 100,
+      "explorer": 109,
+      "unlabeled": 2
+    },
+    "valid": {
+      "input_windows": 211,
+      "confidence": 209,
+      "all_next": 210,
+      "focused_clean": 98,
+      "explorer_clean": 108,
+      "focused": 100,
+      "explorer": 109,
+      "unlabeled": 2
+    },
+    "test": {
+      "input_windows": 211,
+      "confidence": 209,
+      "all_next": 210,
+      "focused_clean": 98,
+      "explorer_clean": 108,
+      "focused": 100,
+      "explorer": 109,
+      "unlabeled": 2
+    }
+  }
+}
+confidence epoch=1 train=1.112253 valid=0.924194
+focused_pretrain epoch=1 train=0.438123 valid=0.157316
+focused_finetune epoch=1 train=0.176923 valid=0.059261
+explorer epoch=1 train=0.436512 valid=0.164862
+{
+  "status": "PASS",
+  "evidence_type": "SYNTHETIC INTEGRATION TEST, NOT REAL DATA ACCURACY",
+  "epochs_per_stage": 1,
+  "trajectories": 3,
+  "test_origins_per_horizon": 204,
+  "all_five_horizons": [
+    50,
+    100,
+    150,
+    200,
+    250
+  ],
+  "audit": {
+    "verified_source_files": 46,
+    "verified_verbatim_functions": 4,
+    "status": "PASS"
+  },
+  "torch": "2.10.0+cpu",
+  "numpy": "2.3.5",
+  "device": "cpu"
+}

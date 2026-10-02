@@ -1,0 +1,712 @@
+--- a/baf_roi/data.py
++++ b/baf_roi/data.py
+@@ -13,7 +13,9 @@
+ from torch.utils.data import Dataset
+ from .config import dump_json, fingerprint
+ from .pose import model_inputs, ypr_to_quat
+-from .supervision import behavior
++from .supervision import centered_pair, label_code, numeric_record, protocol_metadata, NUMERIC_FIELDS
++
++CACHE_FORMAT_VERSION = 2
+ 
+ 
+ def sha256_file(path):
+@@ -130,7 +132,7 @@
+         return self.at(anchor - np.arange(29, -1, -1) / 30, cutoff_index=anchor_index)
+ 
+     def future_history(self, anchor_index):
+-        """Offline next-step regime supervision only, NEVER an inference feature."""
++        """Offline next-step pose history utility; NOT the centered supervision window."""
+         return self.at(self.t[anchor_index] + 1 / 30 - np.arange(29, -1, -1) / 30)
+ 
+     def origin_indices(self):
+@@ -223,20 +225,26 @@
+                     continue
+                 series = Series(t[left:right] - t[left], pose[left:right], max_gap)
+                 anchors, labels, next_labels, targets, scores = [], [], [], [], []
++                current_meta, next_meta = [], []
+                 for i in series.origin_indices():
+                     try:
+                         history = series.history(i)
+                     except ValueError:
+                         continue
+-                    label, score = behavior(history)
++                    # Author's centered LABELS are offline supervision only.
++                    # The causal history above never enters this scoring path.
++                    current_result, next_result = centered_pair(series, int(i))
++                    label = label_code(current_result)
++                    score = current_result['explorer_score'] if current_result is not None else np.nan
+                     try:
+-                        nxt = series.future_history(i)
+-                        nl, _ = behavior(nxt)
+-                        target = nxt[-1]
++                        target = series.at([series.t[i] + 1 / 30])[0]
++                        nl = label_code(next_result)
+                     except ValueError:
+                         nl, target = -2, np.full(6, np.nan)
+                     anchors.append(i); labels.append(label); next_labels.append(nl)
+                     targets.append(target); scores.append(score)
++                    current_meta.append(numeric_record(current_result))
++                    next_meta.append(numeric_record(next_result))
+                 if not anchors:
+                     excluded.append({'file': str(path), 'segment': segment_id, 'reason': 'no causal windows'})
+                     continue
+@@ -248,6 +256,12 @@
+                                   'next_labels': np.array(next_labels, np.int8), 'targets': np.array(targets),
+                                   'scores': np.array(scores)}.items():
+                     np.save(target_dir / (name + '.npy'), arr, allow_pickle=False)
++                # Audit-only copies of the author's original supervision fields.
++                # head_rate_yaw_q90 remains rad/s; no model consumes this archive.
++                np.savez_compressed(target_dir / 'supervision_metadata.npz',
++                    **{prefix + field: np.array([row[field] for row in rows], np.float64)
++                       for prefix, rows in (('current_', current_meta), ('next_', next_meta))
++                       for field in NUMERIC_FIELDS})
+                 label, nl = np.array(labels), np.array(next_labels)
+                 counts = {'input_windows': len(label), 'confidence': int(np.sum(label >= 0)),
+                           'all_next': int(np.sum(nl != -2)),
+@@ -264,7 +278,7 @@
+     for group in ('train', 'valid', 'test'):
+         if not any(r['split'] == group for r in records):
+             raise ValueError(f'No usable trajectories in {group}; inspect missing data/gaps.')
+-    result = {'format_version': 1, 'config': cfg, 'split': split, 'trajectories': records,
++    result = {'format_version': CACHE_FORMAT_VERSION, 'supervision': protocol_metadata(), 'config': cfg, 'split': split, 'trajectories': records,
+               'excluded_segments': excluded, 'normalization': stats.result(),
+               'data_use': 'history 6DoF only; no CSI, MAT, PNG, gaze, scene or ROI features'}
+     result['cache_id'] = fingerprint(result)
+@@ -279,6 +293,13 @@
+     def __init__(self, path):
+         self.path = Path(path)
+         self.manifest = json.loads((self.path / 'manifest.json').read_text(encoding='utf-8'))
++        if self.manifest.get('format_version') != CACHE_FORMAT_VERSION:
++            raise ValueError('Cache protocol changed to author-centered supervision v2. '
++                             'Run prepare into a NEW cache and retrain all four stages; do not reuse v1.')
++        if self.manifest.get('supervision', {}).get('id') != protocol_metadata()['id']:
++            raise ValueError('Unexpected supervision protocol in cache; rebuild with this release.')
++        if self.manifest['supervision']['source_sha256'] != protocol_metadata()['source_sha256']:
++            raise ValueError('Author supervision source differs from this cache; rebuild after source changes.')
+         self.stats = self.manifest['normalization']
+         self.records = self.manifest['trajectories']
+ 
+--- a/baf_roi/evaluate.py
++++ b/baf_roi/evaluate.py
+@@ -150,7 +150,7 @@
+                                    'metrics': {str(h): m.result() for h, m in zip(hs, local_metrics)} if evaluated else {}})
+     report = {'method': 'BAF-Pose recursive rollout + deterministic partition-center ROI',
+               'split': split, 'cache_id': cache.manifest['cache_id'], 'scene_id': scene.snapshot()['scene_id'],
+-              'input': 'history_6dof_only', 'horizons_ms': hs, 'common_origins_for_all_horizons': True,
++              'input': 'history_6dof_only', 'supervision_protocol': cache.manifest['supervision']['id'], 'horizons_ms': hs, 'common_origins_for_all_horizons': True,
+               'interpolation': 'predicted position LERP + predicted quaternion SLERP; exact requested milliseconds',
+               'metrics': {str(h): m.result() for h, m in zip(hs, metrics)},
+               'aggregation': 'micro over all eligible windows/cells; iou_mean is window mean',
+--- a/baf_roi/runtime.py
++++ b/baf_roi/runtime.py
+@@ -21,8 +21,8 @@
+     def load(cls, checkpoint, device='cpu'):
+         # Only load trusted project checkpoints; no arbitrary pickled objects needed.
+         bundle = torch.load(checkpoint, map_location='cpu', weights_only=True)
+-        if bundle.get('format_version') != 1:
+-            raise ValueError('Not a baf_roi history6dof checkpoint.')
++        if bundle.get('format_version') != 2:
++            raise ValueError('Expected v2 author-centered checkpoint. Rebuild cache and retrain; v1 is not compatible.')
+         models = build_models()
+         for name in models:
+             models[name].load_state_dict(bundle['models'][name], strict=True)
+--- a/baf_roi/supervision.py
++++ b/baf_roi/supervision.py
+@@ -1,29 +1,140 @@
+-"""Thesis Sections 3.2/5.1 proxy labels reconstructed from history alone.
+-The supplied ZIP has no script generating its *_with_conf_supervision CSVs.
+-F=0, E=1, ambiguous=-1. None of these labels is an inference input.
++"""OFFLINE supervision using the supplied author's unmodified scoring function.
++
++The labels use a CENTERED one-second window, not the model's causal history.
++Never call this module to supply alpha or other features during inference.
++The original source remains byte-identical under vendor/data_preparation/.
+ """
++from __future__ import annotations
++from functools import lru_cache
++import hashlib
++import importlib.util
++from pathlib import Path
++import sys
++from typing import TYPE_CHECKING
++
+ import numpy as np
+ 
++if TYPE_CHECKING:
++    from .data import Series
+ 
+-def motion_features(history, dt=1 / 30):
+-    x = np.asarray(history, dtype=np.float64)
+-    if x.shape != (30, 6) or not np.all(np.isfinite(x)):
+-        raise ValueError('Behavior supervision requires finite [30,6] history.')
+-    speed = np.linalg.norm(np.diff(x[:, :3], axis=0), axis=1) / dt
+-    yaw_rate = ((np.diff(x[:, 3]) + 180) % 360 - 180) / dt
+-    # Paper does not specify how exact zeros are counted. Explicit convention:
+-    # remove exact-zero rates, then count sign changes; no denoising threshold.
+-    signed = np.sign(yaw_rate)
+-    signed = signed[signed != 0]
+-    crossings = np.count_nonzero(signed[1:] != signed[:-1])
+-    duration = (len(x) - 1) * dt  # actual elapsed duration, 29/30 s
+-    return np.array([speed.mean(), np.quantile(np.abs(yaw_rate), .9),
+-                     crossings / duration, np.mean(np.abs(yaw_rate) > 60)], np.float64)
++ROOT = Path(__file__).resolve().parents[1]
++SOURCE = ROOT / 'vendor/data_preparation/supervision.py'
++PROTOCOL_ID = 'author_centered_supervision_v2'
++LABEL_CODES = {'Focused': 0, 'Explorer': 1, 'Unlabeled': -1}
++NUMERIC_FIELDS = (
++    'binary_target', 'valid_for_confidence', 'confidence_label_time',
++    'confidence_window_end_time', 'confidence_window_start_time',
++    'supervision_window_center_time', 'supervision_window_duration_sec',
++    'supervision_is_centered_window', 'score_valid', 'speed_mean',
++    'head_rate_yaw_q90', 'yaw_zero_cross_per_s', 'head_rate_yaw_hi_prop',
++    'delta_rx_deg_s', 'delta_ry_deg_s', 'delta_rz_deg_s', 'explorer_score',
++)
+ 
+ 
+-def behavior(history):
+-    speed, q90, reversal, hi = motion_features(history)
+-    tr = min(1., speed / .2)
+-    rot = .5 * min(1., q90 / 180) + .3 * min(1., reversal / 3) + .2 * min(1., hi / .5)
+-    score = float(1 / (1 + np.exp(-6 * (.6 * rot + .4 * tr - .5))))
+-    return (1 if score >= .55 else 0 if score <= .45 else -1), score
++@lru_cache(maxsize=1)
++def author_module():
++    """Import only definitions; the author's filesystem/CLI main is NOT executed."""
++    name = '_roi_author_data_preparation_supervision'
++    spec = importlib.util.spec_from_file_location(name, SOURCE)
++    if spec is None or spec.loader is None:
++        raise ImportError(f'Cannot load author supervision from {SOURCE}')
++    module = importlib.util.module_from_spec(spec)
++    sys.modules[name] = module
++    spec.loader.exec_module(module)
++    return module
++
++
++def semantic_supervisor_rotations(ypr: np.ndarray) -> np.ndarray:
++    """Data adapter ONLY: the author hard-codes HeadRY as semantic yaw.
++
++    Our recorder contract is [yaw,pitch,roll] with yaw about world +Z.
++    Supply [pitch,yaw,roll] to this SCORING-ONLY interface. The extra angular
++    debug channels retain that semantic ordering. This is NOT an xyz Euler
++    transform and must not be used for branch quaternions or confidence input.
++    Those keep the existing pose.py [roll,-pitch,yaw] geometric conversion.
++    """
++    ypr = np.asarray(ypr, np.float64)
++    if ypr.ndim != 2 or ypr.shape[1] != 3 or not np.isfinite(ypr).all():
++        raise ValueError('Need finite supervisor rotations [N,3] in degrees.')
++    return ypr[:, [1, 0, 2]].copy()
++
++
++def score_resampled_index(timer, poses_m_ypr, index: int):
++    """Run EXACT author score_one_index on a supplied resampled sequence.
++
++    Shapes: Timer [N], poses [N,6] = meters and dataset yaw/pitch/roll degrees.
++    No label formula, zero handling, thresholds, or feature units are redefined.
++    A None result has the original meaning: insufficient/invalid scoring support.
++    """
++    timer, poses = np.asarray(timer, np.float64), np.asarray(poses_m_ypr, np.float64)
++    if timer.ndim != 1 or poses.shape != (len(timer), 6):
++        raise ValueError('Need Timer[N] and poses[N,6] for offline supervision.')
++    if not 0 <= int(index) < len(timer):
++        raise ValueError('Supervision center index is out of range.')
++    if not np.isfinite(timer).all() or not np.isfinite(poses).all() or np.any(np.diff(timer) <= 0):
++        raise ValueError('Supervision needs finite data and strictly increasing timestamps.')
++    module = author_module()
++    rotation = semantic_supervisor_rotations(poses[:, 3:])
++    return module.score_one_index(timer, poses[:, :3], rotation,
++                                  module.to_radians(rotation), int(index))
++
++
++def centered_pair(series: Series, anchor_index: int):
++    """Offline labels centered at the ACTUAL decision t and exact t+1/30.
++
++    Preserve v1's causal model-input/origin protocol for irregular recordings.
++    The scoring-only 30-Hz grid is re-anchored at this same observed t. A small
++    union covers both centered windows; trimming unused surrounding samples
++    does not change the author's score_one_index mask or its formulas.
++
++    At a file/gap boundary we retain only measured segment coverage, as the
++    author does, and retain MIN_SAMPLES=5. No padding or extrapolation. Inputs
++    to the prediction models are built separately by Series.history(cutoff=t).
++    """
++    t = float(series.t[int(anchor_index)])
++    offsets = np.arange(-16, 18, dtype=np.int64)
++    timer = t + offsets / 30.0
++    # Use the actual observed coverage. There is no nearest-time label matching.
++    keep = (timer >= series.t[0]) & (timer <= series.t[-1])
++    offsets, timer = offsets[keep], timer[keep]
++    poses = series.at(timer)  # OFFLINE label data; never model input.
++    result = []
++    for offset in (0, 1):
++        where = np.flatnonzero(offsets == offset)
++        result.append(score_resampled_index(timer, poses, int(where[0])) if len(where) else None)
++    return tuple(result)
++
++
++def label_code(result) -> int:
++    if result is None:
++        return -1
++    return LABEL_CODES[result['Label']]
++
++
++def numeric_record(result) -> dict:
++    """Preserve author's metadata for audit; this is not a feature vector."""
++    if result is not None:
++        return {key: float(result[key]) for key in NUMERIC_FIELDS}
++    # Defaults from author's ensure_required_columns for an unscorable row.
++    values = dict.fromkeys(NUMERIC_FIELDS, np.nan)
++    values.update(valid_for_confidence=0., score_valid=0.,
++                  supervision_window_duration_sec=1., supervision_is_centered_window=1.)
++    return values
++
++
++def protocol_metadata() -> dict:
++    return {
++        'id': PROTOCOL_ID,
++        'source': 'vendor/data_preparation/supervision.py::score_one_index',
++        'source_sha256': hashlib.sha256(SOURCE.read_bytes()).hexdigest(),
++        'supervision_window': '[center-0.5s, center+0.5s], inclusive author mask',
++        'model_input_window': '[t-29/30s,...,t] with raw support <= t',
++        'sampling_adapter': '30-Hz scoring grid re-anchored to each actual observed decision t',
++        'next_label_center': 't+1/30s; may need label support up to t+1/30+0.5s',
++        'boundary_policy': 'available within the same segment; author MIN_SAMPLES=5; no extrapolation',
++        'zero_rate_policy': 'author: np.sign(0) replaced by +1',
++        'yaw_mapping': 'recorder rot_deg[0] -> scoring-only HeadRY; not geometric xyz input',
++        'head_rate_yaw_q90_unit': 'rad/s (author storage), not deg/s',
++        'delta_debug_units': 'deg/s; unwrapped difference NOT substituted for author np.diff',
++        'usage': 'OFFLINE labels and branch selection only; never input or oracle alpha at inference',
++    }
+--- a/baf_roi/train.py
++++ b/baf_roi/train.py
+@@ -135,7 +135,7 @@
+         best_ckpt = torch.load(run_dir / f'{stage}_best.pt', map_location='cpu', weights_only=True)
+         key = 'focused' if stage.startswith('focused') else stage
+         final_states[key] = best_ckpt['model_state_dict']
+-    bundle = {'format_version': 1, 'models': final_states, 'normalization': cache.stats,
++    bundle = {'format_version': 2, 'supervision': cache.manifest['supervision'], 'models': final_states, 'normalization': cache.stats,
+               'config': cfg, 'cache_id': cache.manifest['cache_id'], 'split': cache.manifest['split'],
+               'epochs_override': epochs_override, 'model_input': 'history_6dof_only',
+               'torch_version': str(torch.__version__), 'selection': 'validation_loss_only'}
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -1,4 +1,5 @@
+ numpy>=1.26,<3
++pandas>=2.2,<3
+ scipy>=1.11,<2
+ torch>=2.8,<3
+ pytest>=8,<10
+--- a/scripts/compare_supervision.py
++++ b/scripts/compare_supervision.py
+@@ -0,0 +1,48 @@
++"""Compare archived v1 labels with author-centered v2 on the SAME cache origins.
++
++This is a preprocessing diagnostic, NOT prediction accuracy or benchmark evidence.
++"""
++from pathlib import Path
++import argparse
++import importlib.util
++import sys
++import numpy as np
++sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
++from baf_roi.data import Cache
++from baf_roi.config import dump_json
++
++
++def compare(cache_path):
++    path = Path(__file__).resolve().parents[1] / 'reference/v1_supervision.py'
++    spec = importlib.util.spec_from_file_location('_archived_v1_supervision', path)
++    old = importlib.util.module_from_spec(spec); spec.loader.exec_module(old)
++    cache = Cache(cache_path)
++    results = []
++    for ti, record in enumerate(cache.records):
++        a = cache.arrays(ti)
++        v1 = np.array([old.behavior(a['series'].history(int(i)))[0] for i in a['anchors']])
++        v2 = a['labels']
++        counts = lambda labels: {name: int(np.sum(labels == value)) for value, name in
++                                  ((0, 'Focused'), (1, 'Explorer'), (-1, 'Unlabeled'))}
++        matrix = np.zeros((3, 3), np.int64)
++        order = {0: 0, 1: 1, -1: 2}
++        for before, after in zip(v1, v2):
++            matrix[order[int(before)], order[int(after)]] += 1
++        results.append({'trajectory': record['key'], 'split': record['split'],
++                        'same_input_origins': len(v1), 'changed_label_count': int(np.sum(v1 != v2)),
++                        'v1': counts(v1), 'v2': counts(v2),
++                        'matrix_rows_v1_columns_v2': matrix.tolist()})
++    return {'purpose': 'PREPROCESSING DIAGNOSTIC ONLY; not accuracy',
++            'matrix_label_order': ['Focused', 'Explorer', 'Unlabeled'],
++            'total_origins': sum(r['same_input_origins'] for r in results),
++            'total_changed_labels': sum(r['changed_label_count'] for r in results),
++            'trajectory_results': results}
++
++
++if __name__ == '__main__':
++    p = argparse.ArgumentParser(description=__doc__)
++    p.add_argument('--cache', required=True); p.add_argument('--output', required=True)
++    args = p.parse_args()
++    report = compare(args.cache)
++    dump_json(args.output, report)
++    print(f"Changed {report['total_changed_labels']}/{report['total_origins']} labels; no accuracy claim.")
+--- a/scripts/verify_smoke_regressions.py
++++ b/scripts/verify_smoke_regressions.py
+@@ -0,0 +1,73 @@
++"""Reproduce v2 batch and oracle-label isolation tests on SYNTHETIC smoke output.
++
++Never modifies the original smoke cache. The deliberately corrupted copy exists
++only inside a fresh output directory, then is removed after the regression test.
++"""
++from pathlib import Path
++import argparse
++import json
++import shutil
++import sys
++import numpy as np
++import torch
++sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
++from baf_roi.config import dump_json
++from baf_roi.evaluate import evaluate
++from baf_roi.runtime import Predictor
++
++
++def main(smoke_dir, output):
++    root, output = Path(smoke_dir).resolve(), Path(output).resolve()
++    marker = json.loads((root / 'smoke_result.json').read_text(encoding='utf-8'))
++    if not marker.get('evidence_type', '').startswith('SYNTHETIC') or marker.get('epochs_per_stage') != 1:
++        raise ValueError('This regression script accepts only this project\'s synthetic smoke output.')
++    if output.exists() and any(output.iterdir()):
++        raise ValueError('Use a new output directory for smoke regression evidence.')
++    output.mkdir(parents=True, exist_ok=True)
++    torch.set_num_threads(2)
++    checkpoint = root / 'run/baf_roi.pt'
++    a = evaluate(root / 'cache', checkpoint, output / 'batch16', 'cpu', batch_size=16)
++    b = evaluate(root / 'cache', checkpoint, output / 'batch7', 'cpu', batch_size=7)
++    comparisons = []
++    for h in a['horizons_ms']:
++        ma, mb = a['metrics'][str(h)], b['metrics'][str(h)]
++        exact_keys = ['n_origins', 'tp', 'fp', 'fn', 'tn', 'exact_match']
++        if not all(ma[k] == mb[k] for k in exact_keys):
++            raise AssertionError(f'Batch regression changed classification counts at {h} ms')
++        comparisons.append({'horizon_ms': h, 'identical_counts_and_exact_match': True,
++                            'translation_mean_abs_delta_m': abs(ma['translation_mean_m'] - mb['translation_mean_m']),
++                            'rotation_mean_abs_delta_deg': abs(ma['rotation_mean_deg'] - mb['rotation_mean_deg'])})
++    # Deliberately preserve the identity in a disposable, label-corrupted COPY to
++    # test whether model/evaluation logic accidentally consults those labels.
++    # This is an adversarial test, not a valid cache for a scientific experiment.
++    mutated = output / 'DISPOSABLE_corrupted_test_labels'
++    shutil.copytree(root / 'cache', mutated)
++    manifest = json.loads((mutated / 'manifest.json').read_text(encoding='utf-8'))
++    try:
++        for r in manifest['trajectories']:
++            if r['split'] == 'test':
++                for name in ('labels', 'next_labels', 'scores'):
++                    path = mutated / r['key'] / f'{name}.npy'
++                    v = np.load(path, allow_pickle=False)
++                    np.save(path, np.full_like(v, -1 if name != 'scores' else np.nan), allow_pickle=False)
++                (mutated / r['key'] / 'supervision_metadata.npz').unlink()
++        c = evaluate(mutated, checkpoint, output / 'no_test_labels', 'cpu', batch_size=16)
++        if c['metrics'] != a['metrics']:
++            raise AssertionError('Test supervision affected evaluation predictions or sample selection')
++    finally:
++        shutil.rmtree(mutated)
++    history = json.loads((root / 'history.json').read_text(encoding='utf-8'))
++    pred = Predictor.load(checkpoint).predict_observations(history['timestamps_s'], history['positions'], history['rotations_deg'])
++    assert pred['positions_m'].shape == (1, 5, 3)
++    out = {'status': 'PASS', 'type': 'SYNTHETIC REGRESSION ONLY',
++           'test_label_corruption_all_metrics_identical': True,
++           'supervision_metadata_deleted_at_test_did_not_affect_predictions': True,
++           'batch_size_16_vs_7': comparisons, 'history_only_prediction': 'PASS'}
++    dump_json(output / 'extra_validation.json', out)
++    print(json.dumps(out, indent=2))
++
++
++if __name__ == '__main__':
++    p = argparse.ArgumentParser(description=__doc__)
++    p.add_argument('--smoke-dir', required=True); p.add_argument('--output', required=True)
++    args = p.parse_args(); main(args.smoke_dir, args.output)
+--- a/tests/test_author_preparation.py
++++ b/tests/test_author_preparation.py
+@@ -0,0 +1,240 @@
++"""Regression tests for the newly supplied ORIGINAL data preparation source."""
++from pathlib import Path
++import importlib.util
++import json
++import sys
++
++import numpy as np
++import pandas as pd
++import pytest
++import torch
++
++from baf_roi.data import Series, Cache, prepare, OriginDataset
++from baf_roi.models import build_models, load_original
++from baf_roi.pose import model_inputs
++from baf_roi.runtime import Predictor
++from baf_roi.supervision import (author_module, score_resampled_index, centered_pair,
++                                 semantic_supervisor_rotations, protocol_metadata,
++                                 label_code, numeric_record)
++from scripts.smoke_test import make_fixture
++
++ROOT = Path(__file__).resolve().parents[1]
++
++
++def load_module(name, path):
++    spec = importlib.util.spec_from_file_location(name, path)
++    module = importlib.util.module_from_spec(spec)
++    sys.modules[name] = module
++    spec.loader.exec_module(module)
++    return module
++
++
++def same_dict(a, b):
++    assert (a is None) == (b is None)
++    if a is None:
++        return
++    assert a.keys() == b.keys()
++    for key in a:
++        if isinstance(a[key], str):
++            assert a[key] == b[key]
++        else:
++            np.testing.assert_allclose(a[key], b[key], rtol=0, atol=0, equal_nan=True,
++                                       err_msg=f'Original field mismatch: {key}')
++
++
++def synthetic(n=151, seed=9):
++    rng = np.random.default_rng(seed)
++    timer = np.arange(n, dtype=float) / 30
++    x = np.zeros((n, 6))
++    x[:, :3] = np.cumsum(rng.normal(0, .004, (n, 3)), axis=0)
++    rate = rng.choice([-240., -30., 0., 0., 30., 240.], n)
++    x[:, 3] = (np.cumsum(rate / 30) + 180) % 360 - 180
++    x[:, 4:] = rng.normal(0, 2, (n, 2))
++    return timer, x
++
++
++@pytest.mark.parametrize('seed', [1, 13, 88])
++def test_all_original_fields_match_author_function_at_every_row(seed):
++    timer, x = synthetic(seed=seed)
++    rot = x[:, [4, 3, 5]]  # independent, explicit semantic yaw mapping
++    m = author_module()
++    for i in range(len(timer)):
++        reference = m.score_one_index(timer, x[:, :3], rot, np.deg2rad(rot), i)
++        same_dict(score_resampled_index(timer, x, i), reference)
++
++
++def test_step3_and_step5_label_scores_match_on_same_flat_input():
++    m = load_module('_test_step3', ROOT / 'vendor/data_preparation/csv_label_generator.py')
++    timer, x = synthetic(91)
++    df = pd.DataFrame(np.column_stack([timer, x[:, :3], x[:, [4, 3, 5]]]),
++                      columns=['Timer', 'HeadX', 'HeadY', 'HeadZ', 'HeadRX', 'HeadRY', 'HeadRZ'])
++    labeled = m.label_dataframe(df)
++    for i in range(len(df)):
++        ours = score_resampled_index(timer, x, i)
++        assert labeled.at[i, 'Label'] == ours['Label']
++        for field in m.OUTPUT_COLUMNS:
++            if field != 'Label':
++                assert labeled.at[i, field] == pytest.approx(ours[field], rel=1e-12, abs=1e-12)
++
++
++def test_centered_label_can_change_while_causal_model_history_is_identical():
++    timer = np.arange(121, dtype=float) / 30
++    still = np.zeros((121, 6)); still[:, 2] = 1.5
++    moving = still.copy()
++    future = np.maximum(0, timer - timer[45])
++    moving[:, 0] += .8 * future
++    moving[:, 3] += 220 * future
++    a, b = Series(timer, still), Series(timer, moving)
++    assert np.array_equal(a.history(45), b.history(45))
++    assert centered_pair(a, 45)[0]['Label'] == 'Focused'
++    assert centered_pair(b, 45)[0]['Label'] == 'Explorer'
++    assert centered_pair(b, 45)[0]['supervision_is_centered_window'] == 1
++
++
++@pytest.mark.parametrize('anchor', [0, 20, 73, 149])
++def test_centered_pair_matches_unmodified_author_on_same_reanchored_grid(anchor):
++    # Nonuniform native observations: keep v1's actual-origin protocol.
++    timer = np.arange(150, dtype=float) / 75 + np.arange(150) * .00007
++    x = np.zeros((150, 6)); x[:, 0] = .27 * timer
++    x[:, 3] = 150 * timer; x[:, 4] = 7 * np.sin(timer)
++    s = Series(timer, x)
++    off = np.arange(-16, 18)
++    query = timer[anchor] + off / 30
++    mask = (query >= timer[0]) & (query <= timer[-1])
++    query, off = query[mask], off[mask]
++    p = s.at(query)
++    r = p[:, [4, 3, 5]]
++    ref = []
++    for k in (0, 1):
++        ids = np.flatnonzero(off == k)
++        ref.append(author_module().score_one_index(query, p[:, :3], r, np.deg2rad(r), int(ids[0]))
++                   if len(ids) else None)
++    got = centered_pair(s, anchor)
++    for a, b in zip(got, ref):
++        same_dict(a, b)
++
++
++def test_exact_zero_rate_matches_author_not_v1_remove_zeros():
++    assert author_module().zero_crossing_count(np.array([-1., 0., -1.])) == 2
++    timer = np.arange(7) / 30
++    x = np.zeros((7, 6)); x[:, 3] = np.r_[0, np.cumsum([-1., 0., -1., 0., -1., 0.])]
++    result = score_resampled_index(timer, x, 3)
++    assert result['yaw_zero_cross_per_s'] == pytest.approx(5 / (6 / 30))
++    v1 = load_module('_test_v1', ROOT / 'reference/v1_supervision.py')
++    old = np.zeros((30, 6)); old[:, 3] = np.r_[0, np.cumsum(np.resize([-1., 0.], 29))]
++    assert v1.motion_features(old)[2] == 0
++
++
++def test_partial_centered_windows_use_author_minimum_five_not_full_thirty():
++    timer, x = synthetic(5)
++    assert score_resampled_index(timer[:4], x[:4], 2) is None
++    result = score_resampled_index(timer, x, 2)
++    assert result is not None and result['score_valid'] == 1
++    assert result['supervision_window_duration_sec'] == 1
++    assert timer[-1] - timer[0] < 1  # nominal duration is NOT actual coverage
++
++
++def test_scoring_yaw_axis_is_not_geometric_xyz_middle_channel():
++    t = np.arange(31) / 30
++    yaw = np.zeros((31, 6)); yaw[:, 0] = .3 * t; yaw[:, 3] = 200 * t
++    pitch = yaw.copy(); pitch[:, 3] = 0; pitch[:, 4] = 200 * t
++    a, b = score_resampled_index(t, yaw, 15), score_resampled_index(t, pitch, 15)
++    assert np.rad2deg(a['head_rate_yaw_q90']) == pytest.approx(200)
++    assert b['head_rate_yaw_q90'] == 0
++    assert a['Label'] == 'Explorer' and b['Label'] == 'Focused'
++    # Neural inputs retain v1's physical transform, not scoring-only column order.
++    conf, _ = model_inputs(yaw[:30], {'mean': [0, 0, 0], 'std': [1, 1, 1]})
++    assert np.allclose(conf[:, -1], yaw[:30, 3])
++    assert np.all(conf[:, -2] == 0)
++
++
++def test_metadata_units_and_wraparound_debug_are_not_silently_corrected():
++    timer = np.arange(7) / 30
++    x = np.zeros((7, 6)); x[:, 3] = [173, 175, 177, 179, -179, -177, -175]
++    out = score_resampled_index(timer, x, 3)
++    assert out['head_rate_yaw_q90'] == pytest.approx(np.deg2rad(60))
++    # Source intentionally uses raw np.diff for debug columns; keep this behavior.
++    assert out['delta_ry_deg_s'] > 1000
++    assert protocol_metadata()['head_rate_yaw_q90_unit'].startswith('rad/s')
++
++
++def test_time_weighted_translation_and_strict_high_rate_threshold():
++    timer = np.array([0, .01, .03, .06, .1])
++    x = np.zeros((5, 6)); x[:, 0] = [0, .01, .011, .012, .02]
++    assert score_resampled_index(timer, x, 2)['speed_mean'] == pytest.approx(.2)
++    for deg_rate, expected in ((59., 0.), (61., 1.)):
++        x[:, 3] = timer * deg_rate
++        assert score_resampled_index(timer, x, 2)['head_rate_yaw_hi_prop'] == expected
++
++
++def test_unlabeled_defaults_are_nan_and_excluded():
++    m = author_module()
++    assert np.isnan(m.label_to_binary_target('Unlabeled'))
++    assert m.label_to_valid_for_confidence('Unlabeled') == 0
++    assert label_code(None) == -1
++    defaults = numeric_record(None)
++    assert defaults['valid_for_confidence'] == defaults['score_valid'] == 0
++    assert np.isnan(defaults['binary_target'])
++
++
++def test_inference_does_not_call_oracle_supervisor(monkeypatch):
++    torch.set_num_threads(2)
++    predictor = Predictor(build_models(), {'mean': [0, 0, 0], 'std': [1, 1, 1]})
++    def forbidden(*args, **kwargs):
++        raise AssertionError('Offline supervisor was called during inference')
++    monkeypatch.setattr(author_module(), 'score_one_index', forbidden)
++    t = np.arange(40) / 30
++    out = predictor.predict_observations(t, np.zeros((40, 3)), np.zeros((40, 3)))
++    assert out['positions_m'].shape == (1, 5, 3)
++    assert out['rollout_positions_m'].shape == (1, 9, 3)
++
++
++def test_source_confidence_reader_drops_nan_labels_before_windowing(tmp_path):
++    # Document the upstream behavior we deliberately do NOT propagate into v2.
++    m = load_original('confidence_reader_test', 'confidence/utility.py')
++    t = np.arange(45) / 30
++    df = pd.DataFrame({'Timer': t, **{c: np.zeros(45) for c in m.POSE_COLS},
++                       'binary_target': np.ones(45), 'valid_for_confidence': np.ones(45)})
++    df['HeadX'] = t
++    df.loc[20, ['binary_target', 'valid_for_confidence']] = [np.nan, 0]
++    path = tmp_path / 'conf.csv'; df.to_csv(path, index=False)
++    samples = m.ConfidenceDatasetBuilder().build_from_file(str(path))
++    sample = next(s for s in samples if abs(s.time_t - t[35]) < 1e-12)
++    assert len(sample.x_window) == 30
++    assert np.max(np.diff(sample.x_window[:, 0])) > 1.5 / 30
++    intact = Series(t, np.column_stack((t, np.zeros((45, 5))))).history(35)
++    assert np.allclose(np.diff(intact[:, 0]), 1 / 30)
++    assert intact[-1, 0] - intact[0, 0] == pytest.approx(29 / 30)
++
++
++def test_cache_stores_centered_current_and_next_metadata_and_keeps_inputs(tmp_path):
++    cfg = make_fixture(tmp_path)
++    manifest = prepare(cfg, tmp_path / 'cache')
++    cache = Cache(tmp_path / 'cache')
++    assert manifest['format_version'] == 2
++    assert manifest['supervision']['id'] == 'author_centered_supervision_v2'
++    arrays = cache.arrays(0)
++    with np.load(cache.path / cache.records[0]['key'] / 'supervision_metadata.npz') as meta:
++        for oi, anchor in enumerate(arrays['anchors']):
++            cur, nxt = centered_pair(arrays['series'], int(anchor))
++            assert arrays['labels'][oi] == label_code(cur)
++            assert meta['current_supervision_window_center_time'][oi] == pytest.approx(arrays['t'][anchor])
++            if nxt is not None:
++                assert meta['next_supervision_window_center_time'][oi] == pytest.approx(arrays['t'][anchor] + 1 / 30)
++            if arrays['next_labels'][oi] != -2:
++                assert np.array_equal(arrays['targets'][oi], arrays['series'].future_history(int(anchor))[-1])
++    ds = OriginDataset(cache.path, 'train', 'confidence')
++    ti, oi = ds.index[len(ds) // 2]
++    a = ds.cache.arrays(int(ti))
++    expected, _ = model_inputs(a['series'].history(int(a['anchors'][oi])), cache.stats)
++    assert np.array_equal(ds[len(ds) // 2]['conf'], expected)
++    assert len(a['pose']) == 720  # Unlabeled poses have NOT been removed.
++
++
++def test_v1_cache_and_checkpoint_are_rejected(tmp_path):
++    (tmp_path / 'manifest.json').write_text(json.dumps({'format_version': 1}))
++    with pytest.raises(ValueError, match='retrain'):
++        Cache(tmp_path)
++    checkpoint = tmp_path / 'v1.pt'; torch.save({'format_version': 1}, checkpoint)
++    with pytest.raises(ValueError, match='retrain'):
++        Predictor.load(checkpoint)
+--- a/tests/test_pipeline.py
++++ b/tests/test_pipeline.py
+@@ -13,7 +13,7 @@
+ from baf_roi.models import build_models, focused, explorer
+ from baf_roi.runtime import Predictor
+ from baf_roi.roi import Scene, grid_centers, load_scene
+-from baf_roi.supervision import behavior, motion_features
++from baf_roi.supervision import score_resampled_index
+ from baf_roi.upstream_ops import slerp_quaternion_wxyz, compute_temporal_optimized_alpha, weighted_bce_loss
+ from baf_roi.train import stage_losses, train
+ from baf_roi.evaluate import Metrics, binary_counts
+@@ -51,7 +51,7 @@
+ 
+ def test_upstream_sources_and_functions_are_exact():
+     result = verify()
+-    assert result['verified_source_files'] == 46
++    assert result['verified_source_files'] == 67
+     assert result['verified_verbatim_functions'] == 4
+ 
+ 
+@@ -226,14 +226,16 @@
+ 
+ 
+ def test_behavior_is_motion_only():
+-    x = np.zeros((30, 6)); x[:, 2] = 1.6
+-    assert behavior(x)[0] == 0
+-    t = np.arange(30) / 30
++    t = np.arange(31) / 30
++    x = np.zeros((31, 6)); x[:, 2] = 1.6
++    assert score_resampled_index(t, x, 15)['Label'] == 'Focused'
+     x[:, 0] = .4 * t; x[:, 3] = 200 * t
+-    assert behavior(x)[0] == 1
+-    speed, q90, rev, hi = motion_features(x)
+-    assert speed == pytest.approx(.4) and q90 == pytest.approx(200)
+-    assert rev == 0 and hi == 1
++    result = score_resampled_index(t, x, 15)
++    assert result['Label'] == 'Explorer'
++    assert result['speed_mean'] == pytest.approx(.4)
++    assert np.rad2deg(result['head_rate_yaw_q90']) == pytest.approx(200)
++    assert result['yaw_zero_cross_per_s'] == 0
++    assert result['head_rate_yaw_hi_prop'] == 1
+ 
+ 
+ def test_weighted_bce_matches_released_run_sh():

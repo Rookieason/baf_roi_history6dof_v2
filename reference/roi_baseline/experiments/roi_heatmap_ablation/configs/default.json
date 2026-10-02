@@ -1,0 +1,38 @@
+{
+  "dataset_root": "/home/tonic/Projects/NSTC/sensor-agent-publish-subscribe",
+  "outputs_dir": "outputs/roi_heatmap_ablation",
+  "split_path": "outputs/splits/dataset_split.json",
+  "seed": 7,
+  "split": {
+    "train": 0.7,
+    "valid": 0.15,
+    "test": 0.15
+  },
+  "horizons_ms": [50, 100, 150, 200],
+  "alignment_tolerance_ms": 40,
+  "pose_history_ms": 250,
+  "pose_history_size": 8,
+  "sample_stride": 1,
+  "scene": {
+    "adaptive_config_path": "../../../../adaptive-volumetric-stream-server-main/config/config_example_front_cache_transform_lod.json",
+    "grid_dim": 8,
+    "object_size_cm": 100.0,
+    "fov_deg": 110,
+    "max_distance_cm": null
+  },
+  "heatmap": {
+    "shape": null,
+    "top_k": 5,
+    "pooled_shape": [8, 8]
+  },
+  "training": {
+    "epochs": 8,
+    "batch_size": 64,
+    "learning_rate": 0.05,
+    "l2": 0.0001
+  },
+  "evaluation": {
+    "threshold": 0.5
+  }
+}
+

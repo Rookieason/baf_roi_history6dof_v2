@@ -1,0 +1,29 @@
+{
+  "data": {
+    "dataset_root": "EDIT_ME/sensor-agent-publish-subscribe",
+    "position_unit": "cm",
+    "rotation_convention": "legacy_ypr_xforward",
+    "coordinate_contract_confirmed": false,
+    "timestamp_numeric_unit": "s",
+    "max_gap_ms": 100
+  },
+  "split": {"seed": 57, "manifest": null},
+  "model": {"sample_rate_hz": 30, "history_frames": 30, "temporal_mu": 0.6},
+  "training": {
+    "seed": 42,
+    "batch_size": 64,
+    "epochs": {"confidence": 10, "focused_pretrain": 8, "focused_finetune": 12, "explorer": 20}
+  },
+  "evaluation": {"horizons_ms": [50, 100, 150, 200, 250]},
+  "scene": {
+    "geometry_confirmed": false,
+    "partition_centers_file": null,
+    "adaptive_config_path": "EDIT_ME/config_example_front_cache_transform_lod.json",
+    "allow_uniform_grid_approximation": false,
+    "grid_dim": 8,
+    "object_size_cm": 100,
+    "visibility_mode": "legacy_center_cone",
+    "fov_deg": 110,
+    "max_distance_m": null
+  }
+}

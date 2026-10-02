@@ -1,0 +1,111 @@
+{
+  "purpose": "PREPROCESSING DIAGNOSTIC ONLY; not accuracy",
+  "matrix_label_order": [
+    "Focused",
+    "Explorer",
+    "Unlabeled"
+  ],
+  "total_origins": 633,
+  "total_changed_labels": 96,
+  "trajectory_results": [
+    {
+      "trajectory": "trajectory_00000",
+      "split": "train",
+      "same_input_origins": 211,
+      "changed_label_count": 32,
+      "v1": {
+        "Focused": 100,
+        "Explorer": 109,
+        "Unlabeled": 2
+      },
+      "v2": {
+        "Focused": 99,
+        "Explorer": 109,
+        "Unlabeled": 3
+      },
+      "matrix_rows_v1_columns_v2": [
+        [
+          85,
+          13,
+          2
+        ],
+        [
+          14,
+          94,
+          1
+        ],
+        [
+          0,
+          2,
+          0
+        ]
+      ]
+    },
+    {
+      "trajectory": "trajectory_00001",
+      "split": "valid",
+      "same_input_origins": 211,
+      "changed_label_count": 32,
+      "v1": {
+        "Focused": 100,
+        "Explorer": 109,
+        "Unlabeled": 2
+      },
+      "v2": {
+        "Focused": 99,
+        "Explorer": 109,
+        "Unlabeled": 3
+      },
+      "matrix_rows_v1_columns_v2": [
+        [
+          85,
+          13,
+          2
+        ],
+        [
+          14,
+          94,
+          1
+        ],
+        [
+          0,
+          2,
+          0
+        ]
+      ]
+    },
+    {
+      "trajectory": "trajectory_00002",
+      "split": "test",
+      "same_input_origins": 211,
+      "changed_label_count": 32,
+      "v1": {
+        "Focused": 100,
+        "Explorer": 109,
+        "Unlabeled": 2
+      },
+      "v2": {
+        "Focused": 99,
+        "Explorer": 109,
+        "Unlabeled": 3
+      },
+      "matrix_rows_v1_columns_v2": [
+        [
+          85,
+          13,
+          2
+        ],
+        [
+          14,
+          94,
+          1
+        ],
+        [
+          0,
+          2,
+          0
+        ]
+      ]
+    }
+  ]
+}

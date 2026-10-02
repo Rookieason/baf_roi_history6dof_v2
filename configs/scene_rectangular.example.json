@@ -1,0 +1,11 @@
+{
+  "geometry_confirmed": false,
+  "partition_centers_file": "EDIT_ME/real_world_partition_centers.json",
+  "adaptive_config_path": null,
+  "visibility_mode": "rectangular_center_frustum",
+  "horizontal_fov_deg": 110,
+  "vertical_fov_deg": 90,
+  "near_m": 0.01,
+  "far_m": null,
+  "max_distance_m": null
+}
