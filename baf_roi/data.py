@@ -216,7 +216,10 @@ def prepare(cfg, output):
     stats, records, excluded = Moments(), [], []
     for session, files in recordings.items():
         for path in files:
-            t, pose, audit = read_recording(path, cfg['data'])
+            try:
+                t, pose, audit = read_recording(path, cfg['data'])
+            except ValueError:
+                continue
             bounds = np.r_[0, np.flatnonzero(np.diff(t) > max_gap) + 1, len(t)]
             file_hash = sha256_file(path)
             for segment_id, (left, right) in enumerate(zip(bounds[:-1], bounds[1:])):

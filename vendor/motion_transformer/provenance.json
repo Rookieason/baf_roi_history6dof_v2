@@ -1,0 +1,11 @@
+{
+  "description": "Verbatim author sources; model and losses reused, original CSV dataset unused.",
+  "sources": {
+    "model.py": "Code/sota_baseline/motion_transformer/model.py",
+    "common_utility.py": "Code/sota_baseline/common/common_utility.py"
+  },
+  "sha256": {
+    "model.py": "63dc7d9029110cfcf24368eff79179efa24301c0c4a8331e4e5c2e414f8ce3d2",
+    "common_utility.py": "d2400d2bc0de7386912066be4977ba977f5ba3236501155105fc11d6205578ec"
+  }
+}

@@ -65,14 +65,15 @@ def synchronize(device):
 
 
 def evaluate(cache_path, checkpoint, output, device='cpu', split='test', batch_size=128,
-             scene_cfg=None, save_masks=True):
+             scene_cfg=None, save_masks=True, *, predictor_class=None):
     if split not in ('valid', 'test') or batch_size < 1:
         raise ValueError('Evaluation split must be valid or test and batch size positive.')
     output = Path(output)
     if output.exists() and any(output.iterdir()):
         raise ValueError('Use a NEW evaluation directory, not an existing report.')
     cache = Cache(cache_path)
-    predictor = Predictor.load(checkpoint, device)
+    predictor = (predictor_class or Predictor).load(checkpoint, device)
+    uses_confidence = callable(getattr(predictor, 'confidence', None))
     if predictor.bundle['cache_id'] != cache.manifest['cache_id']:
         raise ValueError('Checkpoint/cache mismatch. Use the exact cache used for this model.')
     cfg = cache.manifest['config']
@@ -108,14 +109,18 @@ def evaluate(cache_path, checkpoint, output, device='cpu', split='test', batch_s
                     targets.append(target); eligible.append(index)
                 # Update real-origin EMA for ALL causal origins, including warm-up/tail.
                 synchronize(device); started = time.perf_counter()
-                raw = predictor.confidence(histories)
-                alpha = compute_temporal_optimized_alpha(raw, [{'file_name': record['key']}] * len(histories),
-                                                         alpha_state, predictor.mu, init_mode='alpha')
+                if uses_confidence:
+                    raw = predictor.confidence(histories)
+                    alpha = compute_temporal_optimized_alpha(raw, [{'file_name': record['key']}] * len(histories),
+                                                             alpha_state, predictor.mu, init_mode='alpha')
                 if not eligible:
                     continue
                 targets = np.stack(targets)
                 chosen = np.array(eligible)
-                result = predictor.forecast_batch(histories[chosen], hs, initial_alpha=alpha[chosen])
+                if uses_confidence:
+                    result = predictor.forecast_batch(histories[chosen], hs, initial_alpha=alpha[chosen])
+                else:
+                    result = predictor.forecast_batch(histories[chosen], hs)
                 synchronize(device)
                 timings.append({'batch_origins': len(chosen), 'elapsed_ms': (time.perf_counter() - started) * 1000})
                 pred_mask = scene.mask(result['positions_m'], result['quaternions_wxyz'])
@@ -133,14 +138,16 @@ def evaluate(cache_path, checkpoint, output, device='cpu', split='test', batch_s
                         writer.writerow(dict(trajectory=record['key'], session=record['session'],
                                              origin_relative_s=float(series.t[anchor]), origin_epoch_s=epoch[i],
                                              horizon_ms=horizon, target_epoch_s=epoch[i] + horizon / 1000,
-                                             alpha_t=float(result['alpha_t'][i]), tp=tp, fp=fp, fn=fn, tn=tn,
+                                             alpha_t=float(result['alpha_t'][i]) if uses_confidence else '',
+                                             tp=tp, fp=fp, fn=fn, tn=tn,
                                              iou=ious[i], translation_error_m=tr[i, j], rotation_error_deg=rot[i, j]))
                 if save_masks:
                     folder = output / 'predictions'; folder.mkdir(exist_ok=True)
+                    extras = {k: result[k] for k in ('alpha_t', 'rollout_alpha') if k in result}
                     np.savez_compressed(folder / f"{record['key']}_{start:07d}.npz",
                         origin_epoch_s=epoch, horizons_ms=np.array(hs), positions_m=result['positions_m'],
                         quaternions_wxyz=result['quaternions_wxyz'], target_positions_m=targets[:, :, :3],
-                        target_quaternions_wxyz=gt_q, alpha_t=result['alpha_t'], rollout_alpha=result['rollout_alpha'],
+                        target_quaternions_wxyz=gt_q, **extras,
                         roi_pred_packed=np.packbits(pred_mask, axis=-1, bitorder='little'),
                         roi_true_packed=np.packbits(truth_mask, axis=-1, bitorder='little'),
                         num_partitions=np.array(len(scene.centers_m)))
@@ -148,14 +155,17 @@ def evaluate(cache_path, checkpoint, output, device='cpu', split='test', batch_s
             per_trajectory.append({'trajectory': record['key'], 'session': record['session'], 'evaluated': evaluated,
                                    'rejected_missing_future': rejected,
                                    'metrics': {str(h): m.result() for h, m in zip(hs, local_metrics)} if evaluated else {}})
-    report = {'method': 'BAF-Pose recursive rollout + deterministic partition-center ROI',
+    method = 'BAF-Pose' if uses_confidence else 'Motion Transformer'
+    report = {'method': method + ' recursive rollout + deterministic partition-center ROI',
               'split': split, 'cache_id': cache.manifest['cache_id'], 'scene_id': scene.snapshot()['scene_id'],
               'input': 'history_6dof_only', 'supervision_protocol': cache.manifest['supervision']['id'], 'horizons_ms': hs, 'common_origins_for_all_horizons': True,
               'interpolation': 'predicted position LERP + predicted quaternion SLERP; exact requested milliseconds',
               'metrics': {str(h): m.result() for h, m in zip(hs, metrics)},
               'aggregation': 'micro over all eligible windows/cells; iou_mean is window mean',
               'empty_policy': 'both-empty IoU=1; precision/recall/F1 zero when their denominators are zero',
-              'latency': {'kind': 'amortized batched wall time incl. confidence/EMA and full rollout, excludes I/O and ROI mapping',
+              'latency': {'kind': ('amortized batched wall time incl. confidence/EMA and full rollout, excludes I/O and ROI mapping'
+                                   if uses_confidence else
+                                   'amortized batched wall time incl. full rollout, excludes I/O and ROI mapping'),
                           'device': device, 'batch_size_limit': batch_size,
                           'ms_per_origin': sum(t['elapsed_ms'] for t in timings) / sum(t['batch_origins'] for t in timings)},
               'trajectory_results': per_trajectory}

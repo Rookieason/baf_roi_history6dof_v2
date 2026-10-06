@@ -1,5 +1,12 @@
 # BAF-Pose → ROI：僅使用 history 6DoF（v2）
 
+新增學長的 **Motion Transformer ROI 對照組**，位於 `motion_transformer_roi/`；保留作者模型/loss，共用 BAF cache、split、normalization 和 ROI 評估。操作及比較條件見 [docs/MOTION_TRANSFORMER.md](docs/MOTION_TRANSFORMER.md)。
+
+```bash
+python -m motion_transformer_roi train --cache cache/experiment01 --output runs/mt_experiment01 --device auto
+python -m motion_transformer_roi evaluate --cache cache/experiment01 --checkpoint runs/mt_experiment01/motion_transformer_roi.pt --output runs/mt_experiment01/test --device auto
+```
+
 本專案把你提供的 BAF-Pose 程式移植到 `roi_baseline-main` 所描述的 agent6 記錄格式。它是 **pose-mediated ROI prediction**，不是另訓練一個直接輸出 ROI 的分類器。
 
 ```text
