@@ -6,3 +6,4 @@ runs/
 smoke_output/
 *.pt
 Code/
+.venv/

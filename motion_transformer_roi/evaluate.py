@@ -4,6 +4,6 @@ from .runtime import Predictor
 
 
 def evaluate(cache_path, checkpoint, output, device='cpu', split='test', batch_size=128,
-             scene_cfg=None, save_masks=True):
+             scene_cfg=None, save_masks=True, *, horizons_ms=None):
     return evaluate_shared(cache_path, checkpoint, output, device, split, batch_size,
-                           scene_cfg, save_masks, predictor_class=Predictor)
+                           scene_cfg, save_masks, horizons_ms=horizons_ms, predictor_class=Predictor)

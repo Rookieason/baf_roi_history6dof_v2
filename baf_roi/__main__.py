@@ -29,6 +29,8 @@ def main():
     p.add_argument('--output', required=True); p.add_argument('--scene-config'); p.add_argument('--device', default='auto')
     p.add_argument('--split', default='test', choices=['valid', 'test']); p.add_argument('--batch-size', type=int, default=128)
     p.add_argument('--no-save-masks', action='store_true')
+    p.add_argument('--horizons-ms', nargs='+', type=float,
+                   help='Evaluation-only horizons in [50,1000] ms; defaults to the cache manifest.')
     p = sub.add_parser('predict'); p.add_argument('--checkpoint', required=True); p.add_argument('--history', required=True)
     p.add_argument('--output', required=True); p.add_argument('--scene-config'); p.add_argument('--device', default='auto')
     p.add_argument('--horizons-ms', nargs='+', type=float, default=[50, 100, 150, 200, 250])
@@ -52,7 +54,8 @@ def main():
     elif args.command == 'evaluate':
         from .evaluate import evaluate
         report = evaluate(args.cache, args.checkpoint, args.output, device, args.split, args.batch_size,
-                          read_scene_config(args.scene_config) if args.scene_config else None, not args.no_save_masks)
+                          read_scene_config(args.scene_config) if args.scene_config else None, not args.no_save_masks,
+                          horizons_ms=args.horizons_ms)
         print(json.dumps(report['metrics'], indent=2))
     elif args.command == 'predict':
         from .runtime import Predictor

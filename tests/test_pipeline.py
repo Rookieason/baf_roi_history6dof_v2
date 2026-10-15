@@ -288,6 +288,25 @@ def test_batch_independence_and_horizon_order(predictor):
     assert np.max(quaternion_error_deg(one['quaternions_wxyz'][0], batch['quaternions_wxyz'][0, indices])) < .01
 
 
+def test_long_rollout_uses_thirty_recursive_steps(monkeypatch, predictor):
+    seen = []
+    def step(h):
+        seen.append(h.copy())
+        p = h[:, -1, :3] + np.array([1, 0, 0])
+        q = ypr_to_quat(h[:, -1, 3:])
+        return np.full(len(h), .7), p, q, p, q
+    monkeypatch.setattr(predictor, '_step', step)
+    h = histories(1)
+    hs = [1000, 200, 400, 600, 800, 275]
+    out = predictor.forecast_batch(h, hs)
+    assert len(seen) == 30
+    assert np.allclose(out['positions_m'][0, :, 0], h[0, -1, 0] + np.array(hs) * 30 / 1000)
+    assert out['rollout_positions_m'].shape == (1, 31, 3)
+    for bad in ([], [49], [1001], [200, 200], [float('nan')], [float('inf')]):
+        with pytest.raises(ValueError, match='horizons'):
+            predictor.forecast_batch(h, bad)
+
+
 def test_temporal_smoothing_is_invariant_to_batch_boundaries():
     raw = np.array([.1, .9, .2, .7], np.float32)
     meta = [{'file_name': 'a'}] * 4

@@ -5,7 +5,7 @@ import json
 import time
 import numpy as np
 import torch
-from .config import dump_json
+from .config import dump_json, validate_horizons
 from .data import Cache
 from .runtime import Predictor
 from .pose import ypr_to_quat, quaternion_error_deg
@@ -65,7 +65,7 @@ def synchronize(device):
 
 
 def evaluate(cache_path, checkpoint, output, device='cpu', split='test', batch_size=128,
-             scene_cfg=None, save_masks=True, *, predictor_class=None):
+             scene_cfg=None, save_masks=True, *, horizons_ms=None, predictor_class=None):
     if split not in ('valid', 'test') or batch_size < 1:
         raise ValueError('Evaluation split must be valid or test and batch size positive.')
     output = Path(output)
@@ -77,7 +77,7 @@ def evaluate(cache_path, checkpoint, output, device='cpu', split='test', batch_s
     if predictor.bundle['cache_id'] != cache.manifest['cache_id']:
         raise ValueError('Checkpoint/cache mismatch. Use the exact cache used for this model.')
     cfg = cache.manifest['config']
-    hs = cfg['evaluation']['horizons_ms']
+    hs = validate_horizons(cfg['evaluation']['horizons_ms'] if horizons_ms is None else horizons_ms)
     scene = load_scene(scene_cfg or cfg['scene'])
     output.mkdir(parents=True, exist_ok=True)
     dump_json(output / 'scene_snapshot.json', scene.snapshot())

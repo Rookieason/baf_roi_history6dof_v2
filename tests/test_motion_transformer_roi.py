@@ -57,7 +57,11 @@ def test_recursive_rollout_exact_horizons_and_online_units():
     h = np.concatenate((pos[-30:], rot[-30:]), 1)[None]
     assert np.allclose(result['positions_m'], predictor.forecast_batch(h)['positions_m'])
     assert np.array_equal(h[0, :, :3], pos[-30:])
-    for bad in ([], [49], [251], [50, 50], [float('nan')]):
+    extended = predictor.forecast_batch(h, [1000, 200, 400, 600, 800, 275])
+    assert extended['rollout_positions_m'].shape == (1, 31, 3)
+    assert np.allclose(extended['positions_m'][0, :, 0],
+                       pos[-1, 0] + 3 * np.array([1000, 200, 400, 600, 800, 275]) / 1000, atol=1e-4)
+    for bad in ([], [49], [1001], [50, 50], [float('nan')], [float('inf')]):
         with pytest.raises(ValueError):
             predictor.forecast_batch(h, bad)
 
@@ -107,6 +111,27 @@ def test_train_evaluate_identical_baf_origins_and_metrics(tmp_path):
     assert [tuple(r[k] for k in columns) for r in rows] == [tuple(r[k] for k in columns) for r in other]
     assert all(r['alpha_t'] == '' for r in rows)
     assert report['scene_id'] == baf['scene_id']
+    hs = [200, 400, 600, 800, 1000]
+    extended = evaluate(tmp_path / 'cache', checkpoint, tmp_path / 'mt_long', batch_size=32,
+                        horizons_ms=hs, save_masks=False)
+    baf_long = evaluate_baf(tmp_path / 'cache', baf_checkpoint, tmp_path / 'baf_long', batch_size=32,
+                            horizons_ms=hs, save_masks=False)
+    long_rows = read_rows(tmp_path / 'mt_long/per_origin_metrics.csv')
+    baf_rows = read_rows(tmp_path / 'baf_long/per_origin_metrics.csv')
+    assert [tuple(r[k] for k in columns) for r in long_rows] == [tuple(r[k] for k in columns) for r in baf_rows]
+    assert extended['horizons_ms'] == baf_long['horizons_ms'] == hs
+    counts = {m['n_origins'] for m in extended['metrics'].values()}
+    assert len(counts) == 1 and 0 < counts.pop() < report['metrics']['50']['n_origins']
+    assert extended['cache_id'] == report['cache_id'] == Cache(tmp_path / 'cache').manifest['cache_id']
+    assert Cache(tmp_path / 'cache').manifest['config']['evaluation']['horizons_ms'] == [50, 100, 150, 200, 250]
+    for invalid in ([], [49], [1001], [200, 200], [float('nan')]):
+        with pytest.raises(ValueError, match='horizons'):
+            evaluate(tmp_path / 'cache', checkpoint, tmp_path / 'invalid_horizons', horizons_ms=invalid)
+    assert not (tmp_path / 'invalid_horizons').exists()
+    from baf_roi.plot_metrics import plot_metrics
+    figures = plot_metrics([tmp_path / 'baf_long/metrics.csv', tmp_path / 'mt_long/metrics.csv'],
+                           tmp_path / 'figures', ['BAF-ROI', 'Motion Transformer'], include_coverage=True)
+    assert len(figures) == 6 and all(p.stat().st_size > 1000 for p in figures)
     for h in report['horizons_ms']:
         assert report['metrics'][str(h)]['n_origins'] == baf['metrics'][str(h)]['n_origins'] > 0
     files = sorted((tmp_path / 'mt_eval/predictions').glob('*.npz'))

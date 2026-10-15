@@ -15,6 +15,14 @@ def fingerprint(obj):
     return hashlib.sha256(json.dumps(obj, sort_keys=True, ensure_ascii=True).encode()).hexdigest()
 
 
+def validate_horizons(horizons_ms):
+    """Runtime/evaluation horizons; independent of the training cache config."""
+    hs = list(horizons_ms)
+    if not hs or len(set(hs)) != len(hs) or any(not math.isfinite(h) or not 50 <= h <= 1000 for h in hs):
+        raise ValueError('Distinct horizons must be within [50,1000] ms.')
+    return hs
+
+
 def load_config(path):
     path = Path(path).resolve()
     cfg = json.loads(path.read_text(encoding='utf-8'))

@@ -1,5 +1,35 @@
 # BAF-Pose → ROI：僅使用 history 6DoF（v2）
 
+## 延長 Horizon 與評估圖表
+
+兩個模型的 prediction / evaluation 支援 **50–1000 ms**，1000 ms 使用 30 Hz 下的
+30-step recursive rollout。可直接使用既有 v2 checkpoint，無須重訓。
+`evaluate --horizons-ms` 僅覆寫此次評估；不指定時仍使用 cache manifest 的 horizons。
+請保留訓練時的 cache 與 checkpoint，勿只為延長 horizon 重建 cache；cache ID 驗證仍會執行。
+Preparation config 保持原本 50–250 ms 範圍，長 horizon 請透過 evaluation override 指定。
+
+```bash
+python -m baf_roi evaluate --cache cache/experiment01 --checkpoint runs/experiment01/baf_roi.pt --output runs/experiment01/test_1000ms --horizons-ms 200 400 600 800 1000 --device auto
+python -m motion_transformer_roi evaluate --cache cache/experiment01 --checkpoint runs/mt_experiment01/motion_transformer_roi.pt --output runs/mt_experiment01/test_1000ms --horizons-ms 200 400 600 800 1000 --device auto
+python -m baf_roi.plot_metrics --metrics runs/experiment01/test_1000ms/metrics.csv runs/mt_experiment01/test_1000ms/metrics.csv --labels BAF-ROI "Motion Transformer" --output runs/plots_1000ms --include-coverage
+```
+
+圖表工具也接受單一模型，輸出 PNG 與 PDF：
+
+- `mean_iou_vs_horizon`：使用各 origin IoU 平均值 `iou_mean`，不是 `iou_micro`。
+- `missed_redundant_vs_horizon`：使用 `fn / n_origins` 與 `fp / n_origins`。
+- `coverage_vs_selected`（`--include-coverage`）：使用 `(tp + fp) / n_origins` 與
+  `tp / (tp + fn)`，分母為零時 coverage 為 0，與 evaluator 的 recall 規則相同。
+  各點標註 horizon；這些是 operating points，不是固定 horizon 的 selection trade-off curve。
+
+同一次評估的所有 horizons 共用有效 origins；任一 horizon 缺少未來真實 pose 時，該 origin
+會整體排除，因此 1000 ms 評估的 `n_origins` 可能減少。報告保留每條 trajectory 的
+`rejected_missing_future`。模型比較須使用相同 cache、split、horizons、scene geometry 與
+evaluation rules，並確認 `per_origin_metrics.csv` 的 origin/target 欄位相同；僅相同 origin
+數量不足以證明對齊。圖表工具檢查 horizons 與 origin 數量，已有圖檔時拒絕覆寫。
+長時間 rollout 可能累積誤差；這些 HMD-only 結果不能作為 CSI improvement 的證據。
+完整 selection curve 需另做 prediction-side selection sweep，並保持 ground-truth ROI geometry 固定。
+
 新增學長的 **Motion Transformer ROI 對照組**，位於 `motion_transformer_roi/`；保留作者模型/loss，共用 BAF cache、split、normalization 和 ROI 評估。操作及比較條件見 [docs/MOTION_TRANSFORMER.md](docs/MOTION_TRANSFORMER.md)。
 
 ```bash

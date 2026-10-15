@@ -7,6 +7,7 @@ from .models import build_models
 from .pose import model_inputs, ypr_to_quat, quat_to_ypr, interpolate_predictions
 from .upstream_ops import apply_decision_fusion
 from .data import Series
+from .config import validate_horizons
 
 
 class Predictor:
@@ -60,9 +61,7 @@ class Predictor:
         h = np.asarray(histories, np.float64).copy()
         if h.ndim != 3 or h.shape[1:] != (30, 6) or not len(h) or not np.isfinite(h).all():
             raise ValueError('Need finite, nonempty history [B,30,6].')
-        hs = list(horizons_ms)
-        if not hs or len(set(hs)) != len(hs) or any(not np.isfinite(x) or not 50 <= x <= 250 for x in hs):
-            raise ValueError('Distinct horizons must be within [50,250] ms.')
+        hs = validate_horizons(horizons_ms)
         steps = math.ceil(max(hs) * 30 / 1000 - 1e-10)
         ps, qs, alphas = [h[:, -1, :3].copy()], [ypr_to_quat(h[:, -1, 3:])], []
         alpha = None
