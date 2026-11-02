@@ -1,0 +1,10 @@
+{
+  "raw_history_s": 0.9666666666666667,
+  "map_history_s": 0.4,
+  "frames": 8,
+  "size": 24,
+  "max_age_s": 0.15,
+  "min_valid_fraction": 0.5,
+  "max_clock_uncertainty_s": 0.01,
+  "clip": 6.0
+}
