@@ -72,7 +72,6 @@ class HeatmapSeries:
         ids = np.full(cfg.frames, -1, np.int64)
         if self.uncertainty > cfg.max_clock_uncertainty_s:
             return queries, ids
-        # Conservative uncertainty widens raw support and delays availability.
         lo = np.searchsorted(self.end, origin_s - cfg.map_history_s - cfg.max_age_s - self.uncertainty - 1e-9)
         hi = np.searchsorted(self.end, origin_s + 1e-9, side='right')
         candidates = np.arange(lo, hi)
@@ -137,7 +136,7 @@ def load_rf_manifest(path, cache, cfg):
     mapping = {r['key']: r.copy() for r in entries}
     if len(mapping) != len(entries) or set(mapping) != {r['key'] for r in cache.records}:
         raise ValueError('RF manifest must cover every HMD record exactly once; use file=null for missing RF.')
-    groups, rf_files, grids = {}, {}, set()
+    groups, rf_files, raw_sources, grids = {}, {}, {}, set()
     for record in cache.records:
         r = mapping[record['key']]
         group = str(r.get('group_id') or record['session'])
@@ -157,6 +156,12 @@ def load_rf_manifest(path, cache, cfg):
             if 'clock_offset_s' not in r or 'clock_uncertainty_s' not in r:
                 raise ValueError('Declare per-record clock_offset_s and clock_uncertainty_s, even when zero.')
             series = HeatmapSeries(p, r['clock_offset_s'], r['clock_uncertainty_s'], manifest.get('allow_exploratory', False))
+            raw_source = series.metadata.get('raw_sha256')
+            if raw_source:
+                if raw_source in raw_sources and raw_sources[raw_source] != record['split']:
+                    raise ValueError('Reprocessed versions of the same raw CSI recording cross splits.')
+                raw_sources[raw_source] = record['split']
+            r['raw_sha256'] = raw_source
             if series.metadata['clock_domain'] != r.get('source_clock_domain'):
                 raise ValueError('The declared source clock disagrees with map metadata.')
             if series.uncertainty > cfg.max_clock_uncertainty_s:

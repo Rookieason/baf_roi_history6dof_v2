@@ -88,14 +88,22 @@ def balanced_summary(rows):
 
 @torch.inference_mode()
 def evaluate(prepared, output, checkpoint=None, baseline='baf', split='test', device='cpu', batch_size=64,
-             margins=(0.,), delivery_delay_s=0., policy_path=None):
+             margins=(0.,), delivery_delay_s=0., policy_path=None, motion_transformer_checkpoint=None):
     if split not in ('valid', 'test') or batch_size < 1:
         raise ValueError('Evaluation uses valid/test and a positive batch size.')
     dataset = ForecastDataset(prepared, split, delivery_delay_s)
+    if checkpoint and motion_transformer_checkpoint:
+        raise ValueError('Choose an adapter or Motion Transformer, not both.')
+    transformer = None
+    if motion_transformer_checkpoint:
+        from motion_transformer_roi.runtime import Predictor as MotionPredictor
+        transformer = MotionPredictor.load(motion_transformer_checkpoint, device)
+        if transformer.bundle['cache_id'] != dataset.manifest['hmd_cache_id'] or transformer.stats != dataset.cache.stats:
+            raise ValueError('Motion Transformer must use exactly the shared HMD cache and normalization.')
     model, bundle = load_adapter(checkpoint, dataset, device) if checkpoint else (None, None)
     if not checkpoint and baseline not in ('baf', 'focused', 'explorer', 'fixed'):
         raise ValueError('Unknown baseline.')
-    method_id = file_hash(checkpoint) if checkpoint else 'frozen:' + baseline
+    method_id = file_hash(checkpoint or motion_transformer_checkpoint) if checkpoint or motion_transformer_checkpoint else 'frozen:' + baseline
     policy = read_json(policy_path) if policy_path else None
     if policy and (policy['experiment_id'] != dataset.manifest['experiment_id'] or policy['method_id'] != method_id
                    or policy['selected_on_split'] != 'valid'):
@@ -114,7 +122,17 @@ def evaluate(prepared, output, checkpoint=None, baseline='baf', split='test', de
         ris, ois = batch['record_index'].numpy(), batch['origin_index'].numpy()
         original_p = np.stack([dataset.arrays(int(ri))['base_p'][int(oi)] for ri, oi in zip(ris, ois)])
         original_q = np.stack([dataset.arrays(int(ri))['base_q'][int(oi)] for ri, oi in zip(ris, ois)])
-        if model:
+        if transformer:
+            histories = []
+            for ri, oi in zip(ris, ois):
+                record = dataset.records[int(ri)]
+                raw = dataset.cache.arrays(record['cache_index'])
+                anchor = int(dataset.arrays(int(ri))['anchors'][int(oi)])
+                histories.append(raw['series'].history(anchor))
+            prediction = transformer.forecast_batch(np.stack(histories), dataset.horizons)
+            p, q = prediction['positions_m'], prediction['quaternions_wxyz']
+            gates = None  # A transformer has no expert mixing weight.
+        elif model:
             prediction = model(to_device(batch['inputs'], device))
             p, q = numpy_prediction(prediction, original_p, original_q)
             gates = prediction['gate'].cpu().numpy()
@@ -143,13 +161,12 @@ def evaluate(prepared, output, checkpoint=None, baseline='baf', split='test', de
                     state = previous.get(key)
                     transition = None
                     if state and 0 < origin-state[0] <= dataset.cache.manifest['config']['data']['max_gap_ms']/1000 + 1e-6:
-                        # Error in the set of partitions that changed, not a preference for immobility.
                         transition = float(np.mean((pred[b, j] ^ state[1]) != (truth[b, j] ^ state[2])))
                     previous[key] = (origin, pred[b, j].copy(), truth[b, j].copy())
                     rows.append({'record': record['key'], 'group_id': record['group_id'], 'scenario': record['scenario'],
                                  'origin_id': record['key']+':'+str(int(a['anchors'][int(oi)])), 'origin_s': origin,
                                  'horizon_ms': horizon, 'margin_deg': margin,
-                                 'rf_available': int(batch['inputs']['rf_available'][b]), 'gate': float(gates[b, j]),
+                                 'rf_available': int(batch['inputs']['rf_available'][b]), 'gate': float(gates[b, j]) if gates is not None else None,
                                  'tp': int(tp[b, j]), 'fp': int(fp[b, j]), 'fn': int(fn[b, j]), 'tn': int(tn[b, j]),
                                  'iou': float(iou[b, j]), 'translation_error_m': float(tr[b, j]),
                                  'rotation_error_deg': float(rot[b, j]), 'transition_error': transition})
@@ -163,7 +180,7 @@ def evaluate(prepared, output, checkpoint=None, baseline='baf', split='test', de
                        'transition_error_mean': float(np.mean([r['transition_error'] for r in values if r['transition_error'] is not None]))
                        if any(r['transition_error'] is not None for r in values) else None} for key, values in groups.items()}
     report = {'experiment_id': dataset.manifest['experiment_id'], 'scene_id': dataset.manifest['scene']['scene_id'],
-              'method_id': method_id, 'method': bundle['model_config'] if bundle else baseline, 'split': split,
+              'method_id': method_id, 'method': bundle['model_config'] if bundle else ('motion_transformer' if transformer else baseline), 'split': split,
               'horizons_ms': dataset.horizons, 'margins_deg': margin_values, 'delivery_delay_s': delivery_delay_s,
               'policy': policy, 'summaries': summaries, 'rows_sha256': file_hash(out/'per_origin.csv'),
               'empty_policy': 'Both-empty IoU=1; zero-denominator F1/precision=0; coverage undefined when no required cells.',
@@ -177,10 +194,11 @@ def read_rows(directory):
     with (Path(directory)/'per_origin.csv').open(encoding='utf-8', newline='') as stream:
         rows = list(csv.DictReader(stream))
     ints = ('tp', 'fp', 'fn', 'tn', 'rf_available')
-    floats = ('origin_s', 'horizon_ms', 'margin_deg', 'gate', 'iou', 'translation_error_m', 'rotation_error_deg')
+    floats = ('origin_s', 'horizon_ms', 'margin_deg', 'iou', 'translation_error_m', 'rotation_error_deg')
     for r in rows:
         for k in ints: r[k] = int(r[k])
         for k in floats: r[k] = float(r[k])
+        r['gate'] = float(r['gate']) if r['gate'] else None
         r['transition_error'] = float(r['transition_error']) if r['transition_error'] else None
     return rows
 

@@ -133,3 +133,26 @@ def test_manifest_template_requires_human_clock_review(tmp_path, monkeypatch):
     assert saved['records'][0]['clock_uncertainty_s'] > .01
     assert saved['records'][0]['file'] is None
     with pytest.raises(ValueError): module.manifest_template('unused', tmp_path, path)
+
+
+def test_reprocessed_same_raw_recording_cannot_cross_splits(tmp_path):
+    cache, manifest = manifest_fixture(tmp_path)
+    for entry in manifest['records']:
+        path = Path(entry['file'])
+        with np.load(path) as data:
+            arrays = {k: data[k] for k in data.files}
+        metadata = json.loads(str(arrays['metadata_json'].item()))
+        metadata['raw_sha256'] = 'same-raw-acquisition-with-different-processing'
+        arrays['metadata_json'] = np.array(json.dumps(metadata))
+        np.savez(path, **arrays)
+    path = tmp_path/'rf.json'; write_json(path, manifest)
+    with pytest.raises(ValueError, match='same raw CSI'):
+        load_rf_manifest(path, cache, InputConfig())
+
+
+def test_motion_transformer_cli_is_exclusive():
+    from baf_roi_heatmap.__main__ import parser
+    args = parser().parse_args(['evaluate', '--prepared', 'p', '--output', 'o', '--motion-transformer', 'm.pt'])
+    assert args.motion_transformer == 'm.pt' and args.checkpoint is None
+    with pytest.raises(SystemExit):
+        parser().parse_args(['evaluate', '--prepared', 'p', '--output', 'o', '--motion-transformer', 'm.pt', '--checkpoint', 'a.pt'])

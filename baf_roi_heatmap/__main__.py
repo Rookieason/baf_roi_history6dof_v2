@@ -24,7 +24,7 @@ def parser():
     p.add_argument('--hidden', type=int, default=32); p.add_argument('--max-translation-m', type=float, default=.2)
     p.add_argument('--max-rotation-deg', type=float, default=20.); p.add_argument('--max-logit-delta', type=float, default=2.)
     p = commands.add_parser('evaluate'); p.add_argument('--prepared', required=True); p.add_argument('--output', required=True)
-    choice = p.add_mutually_exclusive_group(required=True); choice.add_argument('--checkpoint'); choice.add_argument('--baseline', choices=['baf', 'focused', 'explorer', 'fixed'])
+    choice = p.add_mutually_exclusive_group(required=True); choice.add_argument('--checkpoint'); choice.add_argument('--motion-transformer'); choice.add_argument('--baseline', choices=['baf', 'focused', 'explorer', 'fixed'])
     p.add_argument('--split', choices=['valid', 'test'], default='test'); p.add_argument('--device', default='cpu'); p.add_argument('--batch-size', type=int, default=64)
     p.add_argument('--margins', type=float, nargs='+', default=[0.]); p.add_argument('--delivery-delay-ms', type=float, default=0.); p.add_argument('--policy')
     p = commands.add_parser('policy'); p.add_argument('--validation', required=True); p.add_argument('--output', required=True); p.add_argument('--coverage', type=float, default=.95)
@@ -61,7 +61,7 @@ def main(argv=None):
     elif a.command == 'evaluate':
         from .evaluation import evaluate
         result = evaluate(a.prepared, a.output, a.checkpoint, a.baseline or 'baf', a.split, a.device,
-                          a.batch_size, a.margins, a.delivery_delay_ms/1000, a.policy)
+                          a.batch_size, a.margins, a.delivery_delay_ms/1000, a.policy, a.motion_transformer)
     elif a.command == 'policy':
         from .evaluation import select_policy
         result = select_policy(a.validation, a.output, a.coverage)

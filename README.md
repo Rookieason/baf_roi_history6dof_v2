@@ -1,219 +1,74 @@
-# BAF-Pose → ROI：僅使用 history 6DoF（v2）
+# CSI-assisted ROI Selection：BAF-ROI 的 Heatmap 延伸
 
-## Inference complexity analysis
+本分支基於 `2a75637da2e814205a56484a1e195c2922d9f9c0`。原始 `baf_roi/`、`motion_transformer_roi/`、`vendor/` 保持不變；原本 README 逐字保存在 [README_BASELINE.md](README_BASELINE.md)。
 
-See [docs/COMPLEXITY_ANALYSIS.md](docs/COMPLEXITY_ANALYSIS.md) for end-to-end history 6DoF to pose/ROI analysis: parameters, dense MACs/FLOPs, rollout latency, throughput, memory and profiler traces. Run on the checkpoint host without retraining.
+**研究問題：在相同 HMD history、相同切分、相同 future horizons 與 ROI 幾何下，當下已可取得的 CSI Heatmap，是否能提供超出 HMD history 的資訊，改善未來所需 partitions 的選取？**
 
-```bash
-python -m baf_roi.complexity --checkpoint runs/experiment01/baf_roi.pt --output runs/complexity_baf --device auto --warmup 30 --iterations 300
-```
+教授提出的「Heatmap 輔助 α」是一個候選方案，不是先驗限制。本版實作兩條可比較路徑：
 
-## 延長 Horizon 與評估圖表
+| 方法 | Heatmap 的用途 | 為什麼需要它 |
+|---|---|---|
+| `residual`，主要研究候選 | 依 horizon 修正凍結 BAF 的 future position / rotation | 不把 CSI 的作用限制成在兩個既有專家之間選比例；零初始化可回到原 BAF |
+| `expert_gate`，機制比較組 | 依 horizon 調整 Focused / Explorer 的終點融合權重 | 檢驗「額外資訊主要幫助專家選擇」的假設；不是原 BAF 每一步 α 的原樣替換 |
 
-兩個模型的 prediction / evaluation 支援 **50–1000 ms**，1000 ms 使用 30 Hz 下的
-30-step recursive rollout。可直接使用既有 v2 checkpoint，無須重訓。
-`evaluate --horizons-ms` 僅覆寫此次評估；不指定時仍使用 cache manifest 的 horizons。
-請保留訓練時的 cache 與 checkpoint，勿只為延長 horizon 重建 cache；cache ID 驗證仍會執行。
-Preparation config 保持原本 50–250 ms 範圍，長 horizon 請透過 evaluation override 指定。
+兩者都有 `hmd` 與 `rf` 版本。真正檢驗 CSI 增量價值的比較是 **同一 adapter 的 HMD-only vs HMD+RF**，並同時比較原 BAF、Focused-only、Explorer-only、固定融合與 Motion Transformer。
 
-```bash
-python -m baf_roi evaluate --cache cache/experiment01 --checkpoint runs/experiment01/baf_roi.pt --output runs/experiment01/test_1000ms --horizons-ms 200 400 600 800 1000 --device auto
-python -m motion_transformer_roi evaluate --cache cache/experiment01 --checkpoint runs/mt_experiment01/motion_transformer_roi.pt --output runs/mt_experiment01/test_1000ms --horizons-ms 200 400 600 800 1000 --device auto
-python -m baf_roi.plot_metrics --metrics runs/experiment01/test_1000ms/metrics.csv runs/mt_experiment01/test_1000ms/metrics.csv --labels BAF-ROI "Motion Transformer" --output runs/plots_1000ms --include-coverage
-```
+> 已完成的是可執行程式、測試、合成資料整合驗證與評估工具。尚未使用真實同步 HMD–CSI 測資證明 accuracy gain。合成圖與 smoke test 不可當論文結果。
 
-圖表工具也接受單一模型，輸出 PNG 與 PDF：
+## 文件入口
 
-- `mean_iou_vs_horizon`：使用各 origin IoU 平均值 `iou_mean`，不是 `iou_micro`。
-- `missed_redundant_vs_horizon`：使用 `fn / n_origins` 與 `fp / n_origins`。
-- `coverage_vs_selected`（`--include-coverage`）：使用 `(tp + fp) / n_origins` 與
-  `tp / (tp + fn)`，分母為零時 coverage 為 0，與 evaluator 的 recall 規則相同。
-  各點標註 horizon；這些是 operating points，不是固定 horizon 的 selection trade-off curve。
+| 文件 | 回答的問題 |
+|---|---|
+| [演算法與 pseudocode](docs/README_HEATMAP_ALGORITHM.md) | Heatmap 怎麼處理、為什麼；兩種方法、公式、loss、訓練與推論細節 |
+| [完整架構與執行方式](docs/README_HEATMAP_ARCHITECTURE.md) | 模組/function 分工、資料格式、命令、線上 API 與部署邊界 |
+| [Evaluation 與實驗設計](docs/README_HEATMAP_EVALUATION.md) | 每個對照與指標為什麼必要、matched origins、統計、coverage policy |
+| [驗證紀錄](docs/HEATMAP_VALIDATION.md) | 實際執行的測試、CI、reference equivalence 與仍未證明的項目 |
+| [來源與既有程式對照](docs/HEATMAP_SOURCES.md) | 力行論文／投影片／原 Heatmap 程式的具體對照與雜湊 |
+| [原始 baseline 文件](README_BASELINE.md) | 原本 prepare、BAF 四階段訓練、MT、ROI 與複雜度分析 |
 
-同一次評估的所有 horizons 共用有效 origins；任一 horizon 缺少未來真實 pose 時，該 origin
-會整體排除，因此 1000 ms 評估的 `n_origins` 可能減少。報告保留每條 trajectory 的
-`rejected_missing_future`。模型比較須使用相同 cache、split、horizons、scene geometry 與
-evaluation rules，並確認 `per_origin_metrics.csv` 的 origin/target 欄位相同；僅相同 origin
-數量不足以證明對齊。圖表工具檢查 horizons 與 origin 數量，已有圖檔時拒絕覆寫。
-長時間 rollout 可能累積誤差；這些 HMD-only 結果不能作為 CSI improvement 的證據。
-完整 selection curve 需另做 prediction-side selection sweep，並保持 ground-truth ROI geometry 固定。
+## 安裝與先跑通軟體
 
-新增學長的 **Motion Transformer ROI 對照組**，位於 `motion_transformer_roi/`；保留作者模型/loss，共用 BAF cache、split、normalization 和 ROI 評估。操作及比較條件見 [docs/MOTION_TRANSFORMER.md](docs/MOTION_TRANSFORMER.md)。
+建議獨立 Python 3.11 環境。依硬體選擇 PyTorch；CI 使用 CPU PyTorch 2.10.0。
 
 ```bash
-python -m motion_transformer_roi train --cache cache/experiment01 --output runs/mt_experiment01 --device auto
-python -m motion_transformer_roi evaluate --cache cache/experiment01 --checkpoint runs/mt_experiment01/motion_transformer_roi.pt --output runs/mt_experiment01/test --device auto
-```
-
-本專案把你提供的 BAF-Pose 程式移植到 `roi_baseline-main` 所描述的 agent6 記錄格式。它是 **pose-mediated ROI prediction**，不是另訓練一個直接輸出 ROI 的分類器。
-
-```text
-過去已觀測的 HMD 6DoF
-  → 30 Hz、30 poses 的 causal history
-  → 原版 Confidence CNN + Focused LSTM + Explorer TCN
-  → temporal EMA + translation LERP / quaternion SLERP
-  → 原論文的 recursive rollout
-  → 50 / 100 / 150 / 200 / 250 ms 的 predicted pose
-  → 固定場景幾何的可見性判定
-  → 每個 horizon 的 multi-label ROI mask
-```
-
-**模型不讀取 CSI、heatmap、圖片、gaze、物件語意、場景座標或未來真實 pose。** 場景 partition 座標與相機 FoV 只供最後的幾何轉換；它們不是神經網路的輸入。沒有場景定義，就只能得到 predicted pose，不能有意義地命名哪些物件 partitions 是 ROI。
-
-## v2：已使用補上的作者 data_preparation 原始碼
-
-這版修正 v1 的 supervision 重建：**標籤採作者的 centered `[t-0.5,t+0.5]` 視窗，模型 input 仍為 past-only `[t-29/30,...,t]`。** 推論不執行標註規則、不读未來真實 pose 或 oracle label。
-
-`vendor/data_preparation/` 的 20 個原始檔完整保存，`score_one_index` 直接載入；zero-rate handling、threshold、units 與邊界條件沿用原碼。詳見 **[本次逐項對照](docs/PREPARATION_REVIEW.md)**。
-
-**v1 cache/checkpoint 不相容；請重新 prepare/train 到新目錄。** Neural architecture、loss、fusion、50–250 ms rollout 與 ROI mapping 沒有更換。
-
-## 先釐清論文的 horizon
-
-你提供的《Behavior-Aware 6DoF Head Pose Prediction for Volumetric Video Streaming》主要訓練 next-step predictor，但第 6.2.4 節、Figure 23（印刷頁 65／PDF 第 73 頁）**已經使用 recursive rollout，預測到 30 steps／1 秒**。本專案沿用此方法，不改模型為 multi-head，也不加入 multi-horizon training loss。
-
-保留原版 30 Hz：一個 step 是 33.333… ms。100、200 ms 是第 3、6 step；50、150、250 ms 是第 1.5、4.5、7.5 step。因此最多預測 8 steps，再在相鄰「預測結果」之間做位置 LERP 和 quaternion SLERP，得到指定時間。沒有把 50 ms 偷換成 66.7 ms。
-
-## 已保留與已修改的範圍
-
-`vendor/baf_pose/` 的 23 個檔案保持原始位元組內容；其中三個 `model.py` 由新程式直接載入。`baf_roi/upstream_ops.py` 的四個函式逐字取自原版，包括 SLERP、EMA、fusion 與 weighted BCE。`python -m baf_roi audit` 會核對它們及新增 preparation 原始檔、23 個舊框架參考檔與 v1 supervision 封存檔。
-
-原版推論使用整份測試檔的 position mean/std，包含未來 trajectory。本專案必須改成 **只由 training sessions 計算、保存到 checkpoint 的固定統計量**。這是實質改動，不能宣稱與原版 preprocessing 完全相同。
-
-完整修改紀錄見 [docs/LOGIC_CHANGES.md](docs/LOGIC_CHANGES.md)，原始資料與幾何合約見 [docs/DATA_CONTRACT.md](docs/DATA_CONTRACT.md)。論文／程式差異與閱讀紀錄見 [docs/SOURCE_AUDIT.md](docs/SOURCE_AUDIT.md)。
-
-## 安裝
-
-在這個專案根目錄執行。可以使用已安裝、符合你硬體環境的 PyTorch；其餘依賴由 requirements 安裝。
-
-```bash
-python -m pip install -r requirements.txt
+python -m pip install -r requirements-heatmap.txt
 python -m baf_roi audit
 python -m pytest -q
+python scripts/smoke_heatmap.py --output runs/smoke_heatmap_01
+python -m baf_roi_heatmap --help
 ```
 
-已驗證環境：Python 3.13.5、PyTorch 2.10.0+cpu、NumPy 2.3.5、SciPy 1.17.0、pandas 2.2.3。CUDA 路徑有 device 支援，但這次沒有 GPU 可供實測。`num_workers=0`，適用於 Windows，不需要 Linux 的 fork。
+`smoke_heatmap.py` 自行產生 **synthetic** HMD 與已知 steering CSI，執行原 BAF、MT、四種 adapters、共同 origins 評估、缺測 fallback、coverage policy、oracle、benchmark 與繪圖。輸出目錄必須是新的，避免覆寫實驗。
 
-## 真實資料開始前的設定
+## 真實實驗的最短路徑
 
-編輯 `configs/default.json`。相對路徑以「設定檔所在資料夾」解析，不是任意工作目錄。Windows 路徑可寫成 `C:/Users/...`。
-
-資料根目錄包含：
-
-```text
-sensor-agent-publish-subscribe/
-└── db/
-    ├── session_A/
-    │   └── agent6_head/
-    │       └── head.csv
-    └── session_B/
-        └── agent6_head.csv
-```
-
-不需要 `artifacts/`、MAT 或 PNG。每個 CSV 的 `payload_json` 內含 `pos[3]`、`rot_deg[3]`（或 `rot[3]`），時間來自 `payload.ts_utc`、CSV `ts_utc` 或 `recv_unix`。
-
-必須先核對 `data.position_unit` 與 `data.rotation_convention`，然後才將 `coordinate_contract_confirmed` 設為 `true`。目前實作的是舊 ROI code 的語義：**yaw/pitch/roll，+X forward，+Z up，正 pitch 向上**。這是從舊程式推得的合約，不代表已由實際 recorder 原始碼或真實 CSV 證實。`position_unit` 的 `cm` 同樣只是待確認的起始設定；記錄若為公尺就改成 `m`。HMD 位置也必須與 scene centers 位於相同 world frame。
-
-Scene 設定有兩條路：使用真實 world-space `partition_centers_file`；或沿用外部 adaptive server JSON 的 object centers 加上 uniform grids。後者必須確認 `object_size_cm`，並明確開啟 `allow_uniform_grid_approximation`。確認 FoV 與幾何後，才設 `geometry_confirmed=true`。模型訓練不需要 scene；ROI 評估才需要。
-
-> 上傳的 `roi_baseline-main` 並沒有外部的 `config_example_front_cache_transform_lod.json`、真正的 partition bounds、相機投影矩陣或原始 session CSV。本專案不會替你虛構這些資料。
-
-## 執行流程
-
-每次使用新的輸出資料夾，避免不小心覆寫既有實驗。
+先沿用原專案產生 HMD cache 與 `baf_roi.pt`；raw CSI 必須含實測 timestamps、availability 與實際 subcarrier frequencies。不可從 PNG 或假定的 100 Hz 反推物理資料。
 
 ```bash
-python -m baf_roi prepare --config configs/default.json --output cache/experiment01
-python -m baf_roi train --cache cache/experiment01 --output runs/experiment01 --device auto
-python -m baf_roi evaluate --cache cache/experiment01 --checkpoint runs/experiment01/baf_roi.pt --output runs/experiment01/test --device auto
+python -m baf_roi_heatmap generate --raw data/radio_record.npz --config configs/heatmap_generator.example.json --output data/maps/record_01.npz
+python -m baf_roi_heatmap manifest-template --cache cache/experiment01 --maps-directory data/maps --output data/rf_manifest.json
 ```
 
-預設 training protocol：
+第二個命令產生的是 **需要人工核對的模板**：校對每段 HMD 對應的 RF 檔、clock offset / uncertainty、participant group 與 calibration 證據後才可訓練。模板刻意設為 `synchronization_confirmed=false`，不是要求把旗標盲目改成 true。
 
-| 階段 | 訓練資料 | Epoch 上限 | LR |
-|---|---|---:|---:|
-| Confidence | causal history 對應有效 centered Focused／Explorer target | 10 | 0.001 |
-| Focused pretraining | 所有有效 next-step transitions | 8 | 0.001 |
-| Focused fine-tuning | 當前與下一步皆為 Focused | 12 | 0.0001 |
-| Explorer | 當前與下一步皆為 Explorer | 20 | 0.001 |
-
-Batch size 64；branch 的 AdamW、weight decay、gradient clipping、ReduceLROnPlateau 與 early stopping 延續原版。Confidence 為 Adam 與原 run.sh 的 class-weighted BCE（Focused 3、Explorer 1）。只用 validation loss 選 checkpoint。
-
-`prepare` 會列出每個 split 的兩種 regime、Unlabeled 與 clean transitions 數量。若任一訓練／驗證分支缺少需要的樣本，訓練會報錯；不會偷偷移動 test data、改標籤、放寬門檻或以另一分支頂替。
-
-預設 split 是 session-level 70/15/15、seed 57。**若要與舊 baseline 公平比較，應指定同一份 split manifest**，不要讓兩個方法各自重新分割。`split.manifest` 支援 `train/valid/test`，也接受 `val` 作為 `valid` 的名稱；每個 session 必須恰好出現一次。
-
-## 評估輸出與使用
-
-`metrics.json`、`metrics.csv` 包含每個 horizon 的 multi-label precision／recall／F1／IoU、exact match、per-cell accuracy，以及 pose translation／rotation error。所有 horizons 使用同一批 origins，不按 regime 篩掉難樣本。另有逐 trajectory 結果與 `per_origin_metrics.csv`。
-
-`predictions/*.npz` 儲存每筆 origin 的五個預測 pose、GT pose、alpha 與壓縮 ROI masks。`scene_snapshot.json` 提供 mask 欄位到 partition ID 的對照。還原 mask：
-
-```python
-import numpy as np
-x = np.load("runs/experiment01/test/predictions/trajectory_00000_0000000.npz")
-roi = np.unpackbits(x["roi_pred_packed"], axis=-1,
-                    count=int(x["num_partitions"]), bitorder="little").astype(bool)
-# roi.shape = [batch, 5, num_partitions]
-```
-
-NPZ 名稱依實際 test trajectory 而異，上例路徑需換成輸出檔。大量資料只要 summary 時，evaluate 加 `--no-save-masks`。
-
-矩形 FoV 使用 `configs/scene_rectangular.example.json` 作為設定範例；數值不是你的 HMD 校正結果。可在評估時單獨指定 scene，而不用重訓 pose model：
+完成資料契約後：
 
 ```bash
-python -m baf_roi evaluate --cache cache/experiment01 --checkpoint runs/experiment01/baf_roi.pt --output runs/experiment01/test_rectangular --scene-config configs/scene_rectangular.example.json
+python -m baf_roi_heatmap prepare --cache cache/experiment01 --baseline runs/experiment01/baf_roi.pt --rf-manifest data/rf_manifest.json --output runs/heatmap_prepared --horizons 50 100 150 200 250 400 600 800 1000
+python -m baf_roi_heatmap train --prepared runs/heatmap_prepared --method residual --modality hmd --seed 42 --output runs/residual_hmd_42
+python -m baf_roi_heatmap train --prepared runs/heatmap_prepared --method residual --modality rf --seed 42 --output runs/residual_rf_42
+python -m baf_roi_heatmap evaluate --prepared runs/heatmap_prepared --checkpoint runs/residual_hmd_42/adapter.pt --output runs/eval_hmd_42
+python -m baf_roi_heatmap evaluate --prepared runs/heatmap_prepared --checkpoint runs/residual_rf_42/adapter.pt --output runs/eval_rf_42
+python -m baf_roi_heatmap compare --left runs/eval_hmd_42 --right runs/eval_rf_42 --output runs/paired_42.json
 ```
 
-比較方法時必須一致使用同一種 ROI 定義，不能把圓錐版 baseline 與矩形版 BAF 的數字混在一起。
+完整對照、資料格式、線上呼叫與所有注意事項見架構及評估文件。
 
-## 不需要未來資料的 prediction API
+## 目前範圍與誠實界線
 
-```python
-from baf_roi.runtime import Predictor
-
-predictor = Predictor.load("runs/experiment01/baf_roi.pt", device="cpu")
-result = predictor.predict_observations(
-    timestamps_s=observed_timestamps,       # 僅截至目前，嚴格遞增，單位秒
-    positions=observed_positions,           # checkpoint 指定的記錄單位 cm 或 m
-    rotations_deg=observed_yaw_pitch_roll,  # [N,3]
-    horizons_ms=[50, 100, 150, 200, 250],
-    stream_id="session_A",                 # 約 30 Hz 呼叫；新 session 要 reset
-)
-# result["positions_m"]: [1,5,3]，一律輸出公尺
-# result["quaternions_wxyz"]: [1,5,4]
-# result["rotations_ypr_deg"]: [1,5,3]
-```
-
-呼叫端至少提供約一秒可覆蓋 history 的觀測資料。`stream_id` 用來保留「已觀測時刻」的 confidence EMA；預測到未来的 EMA 不會寫回真實 stream state。不同使用者／session 不可共用同一個 stream ID。
-
-也可用 JSON history：
-
-```bash
-python -m baf_roi predict --checkpoint runs/experiment01/baf_roi.pt --history history.json --output forecast.json
-```
-
-`history.json` 欄位就是 `timestamps_s`、`positions`、`rotations_deg`。加 `--scene-config` 就另外輸出 `roi_mask`。這個 JSON 不需要 target、Label、heatmap 或 scene feature。
-
-## 測試與已知限制
-
-```bash
-python scripts/smoke_test.py --output smoke_output/new_run
-```
-
-此指令生成「明確標示為合成」的 agent6 CSV，四階段各訓練一個 epoch，測試完整流程。它不是你的研究 accuracy，不能當成真實實驗。交付不包含任何在真實資料上訓練的 checkpoint；合成測試權重也未打包，以免與正式實驗模型混淆。
-
-本次執行驗證詳見 [docs/TEST_REPORT.md](docs/TEST_REPORT.md)。最重要的限制是：原版 normalization 已做必要的 causal 修正；行為標註已改用補上的作者原碼，但我們的 recorder/time-grid adapter 與作者 flat CSV 不完全相同；ROI 是 partition-center 的幾何近似，不含 occlusion、實際 mesh intersection 或雙眼不對稱投影；recursive rollout 可能累積誤差，必須在你的 held-out sessions 上量測。
-### 跨 baseline 比較的額外提醒
-
-這份 BAF adaptation 保留約一秒／30 poses 的 history，而舊 ROI 設定是 250 ms／8 samples。若要把差異歸因於 CSI 是否提供額外資訊，其他 baseline 與 proposal 的 history budget、sampling、split、target alignment 與 ROI geometry 也應統一。不能只統一 future horizon，卻讓各方法使用不同的過去資訊量。本版固定保留原 BAF 設定；要縮短它的 history，應另立實驗並記錄變更。
-
-### 查核 v2 supervision
-
-`cache/.../trajectory_*/supervision_metadata.npz` 保存 current_ / next_ 的作者數值欄位，與同目錄 anchors.npy 對齊；只供查核，不進模型。`head_rate_yaw_q90` 保留原碼的 rad/s 单位。對照前後版本標籤可執行：
-
-```bash
-python scripts/compare_supervision.py --cache cache/experiment02 --output runs/experiment02/supervision_comparison.json
-```
-
-它比較相同 input origins 上的 v1/v2 label，**不是模型 accuracy**。
+- 已實作 **numeric AoA–ToF** 生成與時序模型。尚未實作 Doppler / 3D cube 融合；Heatmap 正負差分不等於人體速度或 Doppler。
+- 原 MUSIC 的 covariance / steering / spectrum 核心有數值對照；前處理與時間窗則刻意修正成可用於 causal prediction 的版本。
+- 不自行產生硬體校正、時鐘同步或人體部位標籤。Heatmap 一個亮點不必然是一個 body part。
+- ROI 使用現有 partition-center 幾何。Coverage 不是 SSIM，selected count 不是實際網路 bytes。
+- 實驗固定場景參與 soft-ROI training loss；本版沒有宣稱跨新虛擬場景泛化。
+- Live RF acquisition / hardware driver / network / renderer 不在此套件。Benchmark 不等於完整系統達成 30 Hz。

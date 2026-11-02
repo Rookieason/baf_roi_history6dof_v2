@@ -103,6 +103,8 @@ def main(output, skip_plots=False):
     config = make_fixture(out)
     cache = prepare_hmd(config, out/'cache')
     base = train_baf(out/'cache', out/'baf', 'cpu', epochs_override=1)
+    from motion_transformer_roi.train import train as train_motion_transformer
+    mt = train_motion_transformer(out/'cache', out/'motion_transformer', epochs=1, batch_size=32)
     make_radio(out, cache)
     frozen = prepare(out/'cache', base, out/'rf_manifest.json', out/'prepared',
                      horizons=[50, 250, 1000], input_config=InputConfig(size=8), batch_size=64)
@@ -113,11 +115,13 @@ def main(output, skip_plots=False):
             methods[name] = train(out/'prepared', out/name, ModelConfig(method=method, modality=modality, hidden=8), epochs=1)
     for baseline in ('baf', 'focused', 'explorer', 'fixed'):
         evaluate(out/'prepared', out/('eval_'+baseline), baseline=baseline)
+    evaluate(out/'prepared', out/'eval_motion_transformer', motion_transformer_checkpoint=mt)
+    compare(out/'eval_baf', out/'eval_motion_transformer', out/'mt_paired.json', bootstrap_samples=100)
+    assert all(r['gate'] is None for r in read_rows(out/'eval_motion_transformer'))
     for name, checkpoint in methods.items():
         evaluate(out/'prepared', out/('eval_'+name), checkpoint=checkpoint)
     for method in ('residual', 'expert_gate'):
         compare(out/('eval_'+method+'_hmd'), out/('eval_'+method+'_rf'), out/(method+'_paired.json'), bootstrap_samples=100)
-        # A single test recording is insufficient for a cluster confidence interval.
         paired = json.loads((out/(method+'_paired.json')).read_text())
         assert all(r['cluster_percentile_ci95'] is None for r in paired['results'])
     evaluate(out/'prepared', out/'eval_delayed', checkpoint=methods['residual_rf'], delivery_delay_s=2.)
@@ -140,7 +144,7 @@ def main(output, skip_plots=False):
     result = {'status': 'PASS', 'evidence_type': 'SYNTHETIC SOFTWARE INTEGRATION ONLY',
               'base_epochs_each_stage': 1, 'adapter_epochs': 1, 'adapter_methods': list(methods),
               'matched_origins_per_horizon': len(dataset), 'horizons_ms': frozen['horizons_ms'],
-              'frozen_baselines': 4, 'exact_missing_rf_fallback': True,
+              'frozen_baselines': 4, 'matched_motion_transformer': True, 'exact_missing_rf_fallback': True,
               'single_cluster_ci_correctly_undefined': True, 'plots': 0 if skip_plots else 8,
               'torch': str(torch.__version__), 'numpy': np.__version__, 'device': 'cpu'}
     write_json(out/'smoke_result.json', result); print(json.dumps(result, indent=2))
