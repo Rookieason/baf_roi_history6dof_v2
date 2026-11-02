@@ -1,5 +1,13 @@
 # BAF-Pose → ROI：僅使用 history 6DoF（v2）
 
+## Inference complexity analysis
+
+See [docs/COMPLEXITY_ANALYSIS.md](docs/COMPLEXITY_ANALYSIS.md) for end-to-end history 6DoF to pose/ROI analysis: parameters, dense MACs/FLOPs, rollout latency, throughput, memory and profiler traces. Run on the checkpoint host without retraining.
+
+```bash
+python -m baf_roi.complexity --checkpoint runs/experiment01/baf_roi.pt --output runs/complexity_baf --device auto --warmup 30 --iterations 300
+```
+
 ## 延長 Horizon 與評估圖表
 
 兩個模型的 prediction / evaluation 支援 **50–1000 ms**，1000 ms 使用 30 Hz 下的
