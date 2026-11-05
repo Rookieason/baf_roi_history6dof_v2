@@ -63,16 +63,16 @@ RF raw-support 最早時間、latest measurement、delivery time、clock uncerta
 
 對 origin t、horizon h：P 是預測選取集合，G 是真實 future pose 對應集合。固定同一場景、同一 partition universe：
 
-\[
+$$
 TP=|P\cap G|,\quad FP=|P\setminus G|,\quad FN=|G\setminus P|.
-\]
+$$
 
-\[
+$$
 IoU=\frac{TP}{TP+FP+FN},\quad
 Precision=\frac{TP}{TP+FP},\quad
 Coverage=Recall=\frac{TP}{TP+FN},\quad
 F1=\frac{2TP}{2TP+FP+FN}.
-\]
+$$
 
 | 指標 | 物理／任務意義 | 不能推論什麼 |
 |---|---|---|
@@ -131,10 +131,10 @@ Primary geometric comparison 用相同固定 FoV，先看 IoU、FP、FN、covera
 
 在 validation 每個 horizon 選：
 
-\[
+$$
 m_h^*=\arg\min_{m\in\mathcal M}\overline{|P_{h,m}|}
 \quad\text{s.t.}\quad Coverage^{valid}_{micro}(h,m)\geq\rho.
-\]
+$$
 
 預設 ρ=0.95，只是可指定的 coverage 需求，不是畫質定律。各方法在 validation 選自己的 margin 後鎖定到 test；輸出實際 achieved test coverage 與 selected/FP/FN。若 validation 無候選可行，就報 infeasible。
 
@@ -154,9 +154,9 @@ m_h^*=\arg\min_{m\in\mathcal M}\overline{|P_{h,m}|}
 
 每個 horizon 在相鄰 observed origins 上，計算 predicted changed-partition set 與 GT changed-partition set 的不一致比例：
 
-\[
+$$
 E_{trans}=\frac1K\sum_k \mathbf1[(P_t\triangle P_{t-1})_k\ne(G_t\triangle G_{t-1})_k].
-\]
+$$
 
 這比只量 prediction 自己變動多少更合理，因為使用者真的轉頭時，完全不變的預測不是穩定而是落後。跨 gaps 不計 transition。這仍是診斷，不是「畫面 jitter 已改善」的直接測量；大量 unchanged cells 也會稀釋其值。
 

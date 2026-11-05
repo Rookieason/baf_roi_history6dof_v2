@@ -4,18 +4,18 @@
 
 在真實決策時間 t，已知 HMD 的 30 個 poses，取樣率 30 Hz：
 
-\[
+$$
 X_t=[x_{t-29/30},\ldots,x_t],\qquad x=(p_x,p_y,p_z,yaw,pitch,roll).
-\]
+$$
 
 30 個 samples 的首尾跨度是 29/30 秒，不是完整 1 秒。保留原本 HMD 觀測 EMA 的狀態；因此此數值限制的是顯式 pose/RF window，不能宣稱 predictor 的全部記憶只有一秒。
 
 對每個預測 horizon h，輸出 future pose，再由固定場景 S 的幾何函數 V 轉成集合：
 
-\[
+$$
 \hat G_{t,h}=V(\hat p_{t,h},\hat q_{t,h};S),\qquad
 G_{t,h}=V(p_{t+h},q_{t+h};S).
-\]
+$$
 
 研究比較的是同一 predictor family 的 `HMD-only` 與 `HMD+RF`。未來 pose / ROI 只能當 training target 或 evaluation reference，不能出現在模型 inputs。訓練 loss 的 scene 是已知靜態場景，不是 future observation，但會讓 objective 具有場景依賴性。
 
@@ -29,9 +29,9 @@ G_{t,h}=V(p_{t+h},q_{t+h};S).
 
 單步融合的位置滿足：
 
-\[
+$$
 p=(1-\alpha)p_F+\alpha p_E,\quad 0\leq\alpha\leq1.
-\]
+$$
 
 所以它受限於兩個分支預測位置之間的線段；旋轉受限於相應 shortest-arc interpolation。這是融合形式的幾何限制，不表示所有 recursive α 序列都只在同一條固定線段上。
 
@@ -53,20 +53,20 @@ p=(1-\alpha)p_F+\alpha p_E,\quad 0\leq\alpha\leq1.
 
 `music.py` 保留 AoA–ToF 的 spatial/frequency smoothing、Kronecker steering 排列與 noise-subspace spectrum：
 
-\[
+$$
 a_{r,k}(\theta,\tau)=
 \exp[-j2\pi f_c d\,r\,g(\theta)/c]\,
 \exp[-j2\pi f_k\tau].
-\]
+$$
 
 Rx-major、frequency-minor 的順序與原程式一致。`sin` 定義 g(θ)=sin θ；`legacy_cos` 明確對應原程式的 **g(θ)=1−cos θ**，不是一般的 cos θ。這是座標 convention，不可在沒有 array calibration 的情況下換名稱就當成物理角度。
 
 對每個 trailing window 中的 packet、Tx、Rx/subcarrier sliding aperture 產生 snapshots x，累積：
 
-\[
+$$
 R=\frac1N\sum_n x_nx_n^H,\qquad
 P(\theta,\tau)=\frac1{\|a(\theta,\tau)^H E_n\|_2^2+\epsilon}.
-\]
+$$
 
 `signal_dim` 決定 signal/noise 子空間分界，是需 validation 的 model-order 假設，不是已辨識的人數或身體部位數。零動態 covariance 會標記 invalid，不產生任意亮峰。
 
@@ -88,12 +88,12 @@ P(\theta,\tau)=\frac1{\|a(\theta,\tau)^H E_n\|_2^2+\epsilon}.
 
 每張 map k 儲存三個時間：raw support start s_k、end e_k、計算完成可交付時間 a_k。它們經明示 clock offset 映射到 HMD clock。令 clock uncertainty 為 u，另加測試 delivery delay d；在 origin t 的查詢點 q_j，map 可用的條件為：
 
-\[
+$$
 s_k-u\geq t-W_{raw},\quad
  e_k+u\leq q_j,\quad
  a_k+d+u\leq q_j,\quad
  q_j-(e_k-u)\leq A_{max}.
-\]
+$$
 
 還必須 valid=true。從符合條件者選 measurement end 最新的一張，而不是「時間最近」的一張，亦不跨 future map 做線性插值。
 
@@ -109,10 +109,10 @@ s_k-u\geq t-W_{raw},\quad
 
 只從 training records 估計 median m 與 robust scale s：
 
-\[
+$$
 s=\max(1.4826\,\operatorname{median}|L-m|,10^{-3}),\quad
  Z=\operatorname{clip}((L-m)/s,-6,6).
-\]
+$$
 
 每個 training record 最多均勻抽取 4096 個有效 spectrum values 擬合；validation/test 永不 refit。保留相對尺度但沒有宣稱 MUSIC spectrum 是已校準接收功率。
 
@@ -138,19 +138,19 @@ Concat HMD/RF representations 後，把 horizon seconds 作為額外輸入。MLP
 
 令 v_p、v_r 是 MLP 的兩個三維輸出，定義
 
-\[
+$$
 B_b(v)=b\tanh(\|v\|_2)\frac{v}{\max(\|v\|_2,\epsilon)}.
-\]
+$$
 
-\[
+$$
 \Delta p=B_{0.2m}(v_p),\qquad
 \Delta r=B_{20\pi/180}(v_r),
-\]
+$$
 
-\[
+$$
 \hat p=\hat p_{BAF}+\Delta p,\quad
 \hat q=\operatorname{normalize}(Q(\Delta r)\otimes\hat q_{BAF}).
-\]
+$$
 
 Q 是 rotation-vector exponential quaternion，採左乘，所以修正是 world-frame rotation。不是直接相加 Euler angles，也不是加四維 quaternion。兩個 bound 限制的是向量 L2 norm，不是每軸各 0.2m / 20°。
 
@@ -160,9 +160,9 @@ Q 是 rotation-vector exponential quaternion，採左乘，所以修正是 world
 
 先獨立 recursive rollout Focused-only 與 Explorer-only，得到各 h 的 endpoints。再用原觀測 origin 的 α 作 prior：
 
-\[
+$$
 w_{t,h}=\sigma(\operatorname{logit}(\operatorname{clip}(\alpha_t,10^{-5},1-10^{-5}))+2\tanh(z_{t,h})).
-\]
+$$
 
 位置/旋轉分別為兩個 endpoints 的 LERP/SLERP。
 
@@ -180,9 +180,9 @@ RF 缺測／過期／有效點不足時，兩種 RF 方法都直接回到原 BAF
 
 原 BAF 仍保留原四階段訓練與 behavioral proxy。新增 adapters **不再只用 Explorer/Focused label**，而使用真實 future pose 與 ROI supervision：
 
-\[
+$$
 \mathcal L=\mathcal L_p+\mathcal L_q+0.25\mathcal L_{ROI}+0.001\mathcal L_{reg}.
-\]
+$$
 
 - L_p：對 p/0.1m 與 target/0.1m 使用 SmoothL1，beta=1。
 - L_q：`4(1−<q,q*>²)/(10° in radians)²` 的平均。它對 q 與 −q 等價，是 small-angle surrogate，不是最終報告的 degree error。
