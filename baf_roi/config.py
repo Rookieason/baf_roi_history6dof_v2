@@ -49,9 +49,7 @@ def validate_config(cfg):
     model = cfg['model']
     if model.get('sample_rate_hz') != 30 or model.get('history_frames') != 30:
         raise ValueError('This reproduction deliberately fixes 30 Hz / 30 frames. Changing them is a new experiment.')
-    hs = cfg['evaluation']['horizons_ms']
-    if not hs or len(set(hs)) != len(hs) or any(not math.isfinite(h) or h < 50 or h > 250 for h in hs):
-        raise ValueError('Specify distinct horizons in [50, 250] ms.')
+    validate_horizons(cfg['evaluation']['horizons_ms'])
     if not 0 <= model.get('temporal_mu', .6) <= 1:
         raise ValueError('temporal_mu must be in [0,1].')
     if cfg['training'].get('batch_size', 64) < 1:
