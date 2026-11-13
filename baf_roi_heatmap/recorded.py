@@ -304,11 +304,16 @@ def train_recorded(config_path, output, device):
     if device == 'auto':
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
     if device.startswith('cuda'):
-        torch.cuda.set_per_process_memory_fraction(.5, torch.device(device))
-        free, total = torch.cuda.mem_get_info(torch.device(device))
+        device_index = torch.device(device).index
+        if device_index is None:
+            device_index = torch.cuda.current_device()
+        device = f'cuda:{device_index}'
+        torch.cuda.set_device(device_index)
+        torch.cuda.set_per_process_memory_fraction(.5, device_index)
+        free, total = torch.cuda.mem_get_info(device_index)
         if free < 2*GIB:
             raise RuntimeError('Less than 2 GiB free GPU memory; use --device cpu or free the GPU.')
-        print('GPU', torch.cuda.get_device_name(torch.device(device)), free/GIB, 'GiB free', flush=True)
+        print('GPU', torch.cuda.get_device_name(device_index), free/GIB, 'GiB free', flush=True)
     print('STAGE 1/4: train required pose experts on the NEW cache only', flush=True)
     baseline = train_experts(out/'pose_cache', out/'experts', device)
     print('STAGE 2/4: freeze paired predictions and CSI training targets', flush=True)
