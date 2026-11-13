@@ -42,7 +42,7 @@ def parse_timestamp(value, numeric_unit='s'):
 
 def read_recording(path, data_cfg):
     """Strict schema, no heatmap/artifact dependency; bad rows are not fabricated."""
-    times, poses = [], []
+    times, poses, reception_delays = [], [], []
     with Path(path).open(encoding='utf-8-sig', newline='') as f:
         reader = csv.DictReader(f)
         if not reader.fieldnames or 'payload_json' not in reader.fieldnames:
@@ -52,16 +52,41 @@ def read_recording(path, data_cfg):
                 payload = json.loads(row['payload_json'])
                 if not isinstance(payload, dict):
                     raise ValueError('payload_json must contain a JSON object.')
-                pos = payload['pos']
-                rot = payload.get('rot_deg')
-                if rot is None:
-                    rot = payload.get('rot')
+                if data_cfg.get('payload_format') == 'sensor_full_v2':
+                    convention = 'unreal_world_cm_x_forward_y_right_z_up_pitch_positive_up'
+                    hmd = payload['hmd']
+                    if (payload.get('version') != 2 or not hmd.get('canonical_available')
+                            or not hmd.get('base', {}).get('pose_available')
+                            or hmd.get('coordinate_convention') != convention
+                            or data_cfg['position_unit'] != 'cm'):
+                        raise ValueError('Expected a valid canonical sensor.full v2 HMD in Unreal world centimeters.')
+                    if payload.get('capture_rate_hz') != 30:
+                        raise ValueError('sensor.full capture_rate_hz must match the 30-Hz training contract.')
+                    pos = hmd['position_cm']
+                    rot = [hmd['yaw_deg'], hmd['pitch_deg'], hmd['roll_deg']]
+                    recorded_q = np.asarray(hmd['quaternion_xyzw'], float)[[3, 0, 1, 2]]
+                    recorded_q /= np.linalg.norm(recorded_q)
+                    if not np.isfinite(recorded_q).all() or abs(recorded_q @ ypr_to_quat(rot)) < np.cos(np.deg2rad(.2) / 2):
+                        raise ValueError('Canonical HMD quaternion disagrees with the training yaw/pitch/roll convention.')
+                else:
+                    pos = payload['pos']
+                    rot = payload.get('rot_deg')
+                    if rot is None:
+                        rot = payload.get('rot')
                 if not isinstance(pos, list) or not isinstance(rot, list) or len(pos) != 3 or len(rot) != 3:
                     raise ValueError('Need pos[3] and rot_deg[3] (or rot[3]) in degrees.')
                 pose = np.asarray([*pos, *rot], dtype=np.float64)
                 if pose.shape != (6,) or not np.isfinite(pose).all():
                     raise ValueError('Pose must be six finite scalars.')
                 ts = payload.get('ts_utc')
+                if data_cfg.get('payload_format') == 'sensor_full_v2':
+                    # CSI CSV recv_unix and this field share the collector clock.
+                    # This is a reception-time experiment, not capture-clock calibration.
+                    ts = row['recv_unix']
+                    delay = float(ts) - parse_timestamp(payload['rx_ts_iso'])
+                    if not -.002 <= delay <= data_cfg.get('max_receiver_to_recorder_delay_s', .5):
+                        raise ValueError('Invalid HMD receiver-to-recorder delay; check reception clocks.')
+                    reception_delays.append(delay)
                 if ts is None or ts == '':
                     ts = row.get('ts_utc')
                 unit = data_cfg.get('timestamp_numeric_unit', 's')
@@ -88,7 +113,11 @@ def read_recording(path, data_cfg):
         raise ValueError(f'{path}: fewer than two distinct timestamps after deduplication.')
     x[:, :3] *= .01 if data_cfg['position_unit'] == 'cm' else 1.
     x[:, 3:] = (x[:, 3:] + 180) % 360 - 180
-    return t, x, {'identical_duplicates_removed': int(len(duplicate)), 'rows': len(t)}
+    audit = {'identical_duplicates_removed': int(len(duplicate)), 'rows': len(t)}
+    if reception_delays:
+        audit.update(timestamp_domain='collector_receive_unix',
+                     receiver_to_recorder_delay_p50_max_ms=(np.percentile(reception_delays, [50,100])*1000).tolist())
+    return t, x, audit
 
 
 @dataclass
@@ -143,16 +172,20 @@ class Series:
         return np.unique(indices)
 
 
-def discover_recordings(root):
+def discover_recordings(root, data_cfg=None):
+    data_cfg = data_cfg or {}
+    topic = data_cfg.get('recording_topic', 'agent6*')
+    prefix = data_cfg.get('session_prefix', '')
+    excluded = set(data_cfg.get('exclude_sessions', []))
     db = Path(root) / 'db'
     if not db.is_dir():
         raise ValueError(f'Dataset must contain db/<session>/agent6*: {db}')
     result = {}
     for session in sorted(db.iterdir()):
-        if not session.is_dir():
+        if not session.is_dir() or not session.name.startswith(prefix) or session.name in excluded:
             continue
         paths = []
-        for candidate in sorted(session.glob('agent6*')):
+        for candidate in sorted(session.glob(topic)):
             if candidate.is_file() and candidate.suffix.lower() == '.csv':
                 paths.append(candidate)
             elif candidate.is_dir():
@@ -160,7 +193,7 @@ def discover_recordings(root):
         if paths:
             result[session.name] = sorted(set(paths))
     if not result:
-        raise ValueError(f'No agent6 CSV recordings found below {db}.')
+        raise ValueError(f'No {topic} CSV recordings for prefix {prefix!r} found below {db}.')
     return result
 
 
@@ -208,7 +241,7 @@ def prepare(cfg, output):
     output = Path(output)
     if output.exists() and any(output.iterdir()):
         raise ValueError(f'{output} is not empty. Use a NEW cache path; existing experiments are never overwritten.')
-    recordings = discover_recordings(cfg['data']['dataset_root'])
+    recordings = discover_recordings(cfg['data']['dataset_root'], cfg['data'])
     split = make_split(recordings, cfg['split'])
     membership = {s: key for key, sessions in split.items() for s in sessions}
     output.mkdir(parents=True, exist_ok=True)
@@ -219,6 +252,8 @@ def prepare(cfg, output):
             try:
                 t, pose, audit = read_recording(path, cfg['data'])
             except ValueError:
+                if cfg['data'].get('strict_schema', False):
+                    raise
                 continue
             bounds = np.r_[0, np.flatnonzero(np.diff(t) > max_gap) + 1, len(t)]
             file_hash = sha256_file(path)

@@ -1,0 +1,107 @@
+{
+  "data": {
+    "dataset_root": "../../sensor-agent-publish-subscribe",
+    "position_unit": "cm",
+    "rotation_convention": "legacy_ypr_xforward",
+    "coordinate_contract_confirmed": true,
+    "timestamp_numeric_unit": "s",
+    "max_gap_ms": 100,
+    "payload_format": "sensor_full_v2",
+    "recording_topic": "sensor.full.50010",
+    "session_prefix": "20261031",
+    "strict_schema": true,
+    "exclude_sessions": [
+      "20261031-084133_upperbody_part"
+    ]
+  },
+  "split": {
+    "seed": 57,
+    "manifest": "splits_20261031.json"
+  },
+  "model": {
+    "sample_rate_hz": 30,
+    "history_frames": 30,
+    "temporal_mu": 0.6
+  },
+  "training": {
+    "seed": 42,
+    "batch_size": 64,
+    "epochs": {
+      "confidence": 10,
+      "focused_pretrain": 8,
+      "focused_finetune": 12,
+      "explorer": 20
+    }
+  },
+  "evaluation": {
+    "horizons_ms": [
+      50,
+      100,
+      150,
+      200,
+      250
+    ]
+  },
+  "scene": {
+    "geometry_confirmed": true,
+    "partition_centers_file": null,
+    "adaptive_config_path": "../../adaptive-volumetric-stream-server/config/config_example_front_cache_transform_lod.json",
+    "allow_uniform_grid_approximation": true,
+    "grid_dim": 8,
+    "object_size_cm": 100,
+    "visibility_mode": "legacy_center_cone",
+    "fov_deg": 110,
+    "max_distance_m": null
+  },
+  "recorded_heatmaps": {
+    "representation": "aoa_tof",
+    "epochs": 20,
+    "map_rate_hz": 30,
+    "minimum_rf_coverage": 0.5,
+    "generation": {
+      "subcarriers": 1001,
+      "center_mhz": 5775,
+      "antenna_order": [
+        6,
+        7,
+        4,
+        5,
+        2,
+        3,
+        0,
+        1
+      ],
+      "background_half_frames": 12,
+      "past_only": false,
+      "source_shape": [
+        90,
+        130
+      ],
+      "signal_subspace_dimension": 20,
+      "antenna_spacing_m": 0.015,
+      "subcarrier_spacing_hz": 1171875,
+      "steering_vector_size": [
+        6,
+        63
+      ]
+    },
+    "input_config": {
+      "raw_history_s": 0.9666666666666667,
+      "map_history_s": 0.4,
+      "frames": 8,
+      "size": 24,
+      "max_age_s": 0.15,
+      "min_valid_fraction": 0.5,
+      "max_clock_uncertainty_s": 0.01,
+      "clip": 6.0
+    },
+    "valder_source_sha256": {
+      "rt_data_processing/heatmap_generator.py": "0903d7fa4e4ab70f57c4afb2cc4bf388ba5b81c89789bd03d5c98234e9ae873d",
+      "rt_data_processing/csi_merger.py": "fbee1f2490507f5bde90b04133a804b728178f00642d55aa94b4d5c39477b661",
+      "rt_data_processing/run_heatmap.py": "a78ff6712e5dae107e663a97eb6dc3fdb72633675497384ad805e2ad698e7c0f"
+    },
+    "excluded_session_reasons": {
+      "20261031-084133_upperbody_part": "No precomputed maps fit the 29/30-second raw-support budget after accounting for actual multi-NIC delivery and interpolation. Excluded on input timing quality, before model fitting."
+    }
+  }
+}

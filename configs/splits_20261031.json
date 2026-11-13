@@ -1,0 +1,25 @@
+{
+  "train": [
+    "20261031-084248_upperbody_part",
+    "20261031-084301_upperbody_part",
+    "20261031-084315_upperbody_part",
+    "20261031-084328_upperbody_part",
+    "20261031-084350_lowerbody_part",
+    "20261031-084359_lowerbody_part",
+    "20261031-084524_lowerbody_part",
+    "20261031-084539_lowerbody_part",
+    "20261031-084549_lowerbody_part",
+    "20261031-084629_longlong",
+    "20261031-085925_longlong"
+  ],
+  "valid": [
+    "20261031-084236_upperbody_part",
+    "20261031-084415_lowerbody_part",
+    "20261031-084933_longlong"
+  ],
+  "test": [
+    "20261031-084223_upperbody_part",
+    "20261031-084512_lowerbody_part",
+    "20261031-085301_longlong"
+  ]
+}

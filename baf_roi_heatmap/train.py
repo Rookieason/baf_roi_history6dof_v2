@@ -68,6 +68,7 @@ def train(prepared, output, config=None, epochs=20, batch_size=64, lr=1e-3, seed
         loss = train_epoch(model, train_loader, optimizer, training.scene, device, roi_weight) if epoch else None
         score = validation_iou(model, validation, valid_loader, device)
         log.append({'epoch': epoch, 'train_loss': loss, 'validation_recording_macro_iou': score})
+        print(f'CSI adapter epoch={epoch}/{epochs} train_loss={loss} validation_IoU={score:.6f}', flush=True)
         if score > best + 1e-12:
             best = score
             bundle = {'format_version': 1, 'model': model.state_dict(), 'model_config': asdict(config),
