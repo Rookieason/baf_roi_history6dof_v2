@@ -20,7 +20,8 @@ export PYTHONDONTWRITEBYTECODE=1
 export OMP_NUM_THREADS="$THREADS" MKL_NUM_THREADS="$THREADS" OPENBLAS_NUM_THREADS="$THREADS"
 export XDG_CACHE_HOME="$RUN_ROOT/.cache" MPLCONFIGDIR="$RUN_ROOT/.matplotlib"
 export TMPDIR="$RUN_ROOT/tmp"
-RUN_DIR="$(mktemp -d "$RUN_ROOT/run_$(date -u +%Y%m%dT%H%M%SZ)_XXXXXX")"
+RUN_DIR="$RUN_ROOT/run_$(date -u +%Y%m%dT%H%M%SZ)"
+mkdir "$RUN_DIR"
 # Keep the log outside RUN_DIR: prepare requires an empty experiment directory.
 LOG_FILE="$RUN_ROOT/logs/$(basename "$RUN_DIR").log"
 ln -sfn "$LOG_FILE" "$RUN_ROOT/latest_training.log"
