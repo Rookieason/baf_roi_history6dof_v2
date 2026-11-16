@@ -37,29 +37,7 @@ def oracle(prepared, output_path, split='valid', grid_points=21):
     return result
 
 
-def plot(directories, output):
-    import matplotlib
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
-    out = new_directory(output)
-    reports = [read_json(Path(d)/'report.json') for d in directories]
-    if len({r['experiment_id'] for r in reports}) != 1:
-        raise ValueError('Plot only matched prepared experiments.')
-    for metric in ('iou_mean', 'f1_micro', 'coverage_micro', 'fp_mean', 'fn_mean', 'selected_mean', 'translation_mean_m', 'rotation_mean_deg'):
-        fig, ax = plt.subplots(figsize=(7, 4.5))
-        for directory, report in zip(directories, reports):
-            groups = defaultdict(list)
-            for row in read_rows(directory): groups[row['horizon_ms']].append(row)
-            for values in groups.values():
-                if len({v['margin_deg'] for v in values}) != 1:
-                    raise ValueError('Plot one policy/margin per horizon, not a margin sweep.')
-            from .evaluation import balanced_summary
-            horizons = sorted(groups)
-            values = [balanced_summary(groups[h])['recording_macro'][metric] for h in horizons]
-            method = report['method']
-            label = method if isinstance(method, str) else '/'.join(method[k] for k in ('method', 'modality', 'ablation'))
-            ax.plot(horizons, values, marker='o', label=label)
-        ax.set_xlabel('Prediction horizon (ms)'); ax.set_ylabel(metric + ' (recording macro)')
-        ax.grid(True, alpha=.3); ax.legend(fontsize=8)
-        fig.tight_layout(); fig.savefig(out/(metric+'.png'), dpi=160); plt.close(fig)
-    return {'output': str(out), 'plots': 8}
+def plot(directories, output, aggregation='pooled', margin=0.):
+    """Compatibility wrapper for the shared, explicitly aggregated plots."""
+    from roi_experiments.plot import plot as shared_plot
+    return shared_plot(directories, output, aggregation, margin)

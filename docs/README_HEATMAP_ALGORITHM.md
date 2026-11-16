@@ -1,5 +1,9 @@
 # Heatmap 演算法、研究理由與 Pseudocode
 
+本文件說明既有 `baf_roi_heatmap/` 的 residual／terminal expert_gate。新增的 `baf_roi_heatmap_alpha/` 是第三條 RF 路徑，僅修改原 BAF autoregressive rollout 裡的 α，詳見 [alpha-only 演算法](README_HEATMAP_ALPHA.md)。四種正式 models 的執行方式見 [共同入口](README_EXPERIMENTS.md)。
+
+**資料來源：** 目前 `recorded_20261031` 訓練 profile 讀取 `intermediates/<session>/heatmaps/<session>_heatmaps.npz` 內已生成的 AoA–ToF dB 數值；不在 training batch 重算 MUSIC。`generate` 是只有 raw CSI 時可獨立使用的工具。預先產生不等於可以使用 future information，仍須依完整 raw support 與 availability 對齊。
+
 ## 1. 問題定義：要改善的是未來 ROI，不是 α 分類率
 
 在真實決策時間 t，已知 HMD 的 30 個 poses，取樣率 30 Hz：
@@ -23,7 +27,7 @@ $$
 
 20261016 投影片 slides 2–3、13、19–20 與 10/09 前研究先檢查 non-head body history 的增量資訊，再提出 CSI 實驗。其 motion-capture 結果不是 CSI sensing 成功的證據，也沒有證明固定的腳→骨盆→頭順序。因此本版不強制 skeleton reconstruction、不替 heatmap peaks 命名 body parts，而讓時序模型學習可預測的變化。來源細節見 [HEATMAP_SOURCES.md](HEATMAP_SOURCES.md)。
 
-## 2. 為什麼不是只把 Heatmap 丟進 α？
+## 2. 既有 residual 與 terminal gate 的不同假設
 
 原 BAF 用 causal HMD history 估計 Explorer 傾向，α 越大越靠近 Explorer。兩個分支是 Focused LSTM 和 Explorer TCN，最後以位置 LERP / quaternion SLERP 融合。原論文式 (5.7) 使用 μ=0.6 的 temporal smoothing。
 
@@ -114,7 +118,7 @@ s=\max(1.4826\,\operatorname{median}|L-m|,10^{-3}),\quad
  Z=\operatorname{clip}((L-m)/s,-6,6).
 $$
 
-每個 training record 最多均勻抽取 4096 個有效 spectrum values 擬合；validation/test 永不 refit。保留相對尺度但沒有宣稱 MUSIC spectrum 是已校準接收功率。
+每份不同 SHA256 的 training RF 檔最多均勻抽取 4096 個有效 spectrum values 擬合；多個 HMD gap segments 引用同檔只採樣一次；validation/test 永不 refit。保留相對尺度但沒有宣稱 MUSIC spectrum 是已校準接收功率。
 
 每個查詢時間的三個 channels：
 
@@ -166,7 +170,7 @@ $$
 
 位置/旋轉分別為兩個 endpoints 的 LERP/SLERP。
 
-**此方法不同於原 BAF 每個 recursive step 都重新算 α 的路徑。** Head=0 時是以 α_t 混合兩條純專家 rollout endpoints，不保證等於原 BAF；它應被稱為 `expert_gate` adaptation，不能稱為忠實的原 α replacement。若日後研究要求逐步調 α，需另立方法和 train/inference contract，不能把本比較組結果混稱。
+**此方法不同於原 BAF 每個 recursive step 都重新算 α 的路徑。** Head=0 時是以 α_t 混合兩條純專家 rollout endpoints，不保證等於原 BAF；它應被稱為 `expert_gate` adaptation，不能稱為忠實的原 α replacement。本分支現在已另立 `baf_roi_heatmap_alpha` 來處理逐步 α，使用獨立 train/inference contract；本比較組結果仍不能混稱為它。
 
 HMD-only gate 與 RF gate 使用相同 task loss、相同 frozen experts；另外有原 BAF、每步固定0.5融合與純專家，避免把不同 rollout 方式帶來的改變誤認成 CSI gain。
 
@@ -193,7 +197,7 @@ $$
 
 Cone 的 soft visibility 為 sigmoid((cosine−cos(FoV/2))/0.02)；frustum 對各邊界用 0.03m sigmoid temperature。這是可微近似；最終所有數據都用原 `Scene.mask` 硬判定，不能拿 soft training score 代替 test IoU。
 
-AdamW，lr=0.001、weight_decay=0.0001、gradient clip=5、預設20epochs/batch64。Checkpoint 由 validation **recording-macro hard IoU**、各 trained horizon 等權平均選擇；epoch0 也可被選中。沒有提高就應允許維持 baseline，不把訓練完成當成有效增益。
+AdamW，lr=0.001、weight_decay=0.0001、gradient clip=5、預設20epochs/batch64。Checkpoint 由 validation **original-recording macro hard IoU**、各 trained horizon 等權平均選擇；同原始 recording 的 gap segments 先合併；epoch0 也可被選中。沒有提高就應允許維持 baseline，不把訓練完成當成有效增益。
 
 ## 8. Pseudocode
 

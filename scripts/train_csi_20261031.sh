@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# One command: bash scripts/train_csi_20261031.sh
-# New-day experts -> frozen predictions -> HMD+CSI adapter -> held-out test.
+# All four methods: bash scripts/train_csi_20261031.sh
+# One method: bash scripts/train_csi_20261031.sh --method baf_roi_heatmap_alpha
+# Shared data -> selected models -> one matched evaluation protocol.
 set -euo pipefail
 
 # All machine-specific settings live here; no exported variables are required.
@@ -25,8 +26,9 @@ mkdir "$RUN_DIR"
 # Keep the log outside RUN_DIR: prepare requires an empty experiment directory.
 LOG_FILE="$RUN_ROOT/logs/$(basename "$RUN_DIR").log"
 ln -sfn "$LOG_FILE" "$RUN_ROOT/latest_training.log"
-nohup "$PYTHON" -u -m baf_roi_heatmap.recorded train \
+nohup "$PYTHON" -u scripts/run_experiments.py \
   --config "$CONFIG" --output "$RUN_DIR" --device "$DEVICE" --threads "$THREADS" \
+  "$@" \
   > "$LOG_FILE" 2>&1 < /dev/null &
 TRAINING_PID=$!
 printf '%s\n' "$TRAINING_PID" > "$RUN_ROOT/latest_training.pid"

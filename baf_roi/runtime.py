@@ -10,6 +10,33 @@ from .data import Series
 from .config import validate_horizons
 
 
+def observed_weights(raw, times, mu, max_gap, state=None):
+    """Update EMA only at actual observed origins; reset across decision gaps.
+
+    The returned state belongs to the real stream, never to a future rollout.
+    Carry it across batches for the same trajectory and discard it at a reset.
+    """
+    values = np.asarray(raw, np.float64).reshape(-1)
+    times = np.asarray(times, np.float64)
+    if times.ndim != 1 or len(times) != len(values):
+        raise ValueError('One observed timestamp is required per confidence value.')
+    if (not np.isfinite(values).all() or np.any((values < 0) | (values > 1))
+            or not np.isfinite(times).all()):
+        raise ValueError('Observed confidence must be finite in [0,1], with finite timestamps.')
+    if not math.isfinite(mu) or not 0 <= mu <= 1 or not math.isfinite(max_gap) or max_gap <= 0:
+        raise ValueError('EMA needs mu in [0,1] and a finite positive maximum gap.')
+    if state is not None and (len(state) != 2 or not np.isfinite(state).all() or not 0 <= state[1] <= 1):
+        raise ValueError('Invalid observed EMA state.')
+    result = []
+    for value, timestamp in zip(values, times):
+        if state is not None and timestamp <= state[0]:
+            raise ValueError('Observed decision timestamps must strictly increase.')
+        alpha = float(value) if state is None or timestamp - state[0] > max_gap else mu * float(value) + (1 - mu) * state[1]
+        state = (float(timestamp), alpha)
+        result.append(alpha)
+    return np.asarray(result, np.float32), state
+
+
 class Predictor:
     def __init__(self, models, stats, mu=.6, device='cpu', data_config=None):
         self.device = torch.device(device)

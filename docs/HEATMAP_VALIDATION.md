@@ -1,5 +1,31 @@
 # Heatmap extension：實際驗證紀錄
 
+## 0. 2026-11-16：共同 runner 與 per-step alpha 的驗證
+
+本次修改以檢查前分支 head `20ad7510c8dd937668d35bcc66f818c5d132c462` 為基礎。以下是本次實際在 CPU 執行的驗證，不代表已完成真實資料訓練；GitHub CI 狀態應另以該次 commit 的 Actions 結果為準。
+
+| 驗證 | 結果 |
+|---|---|
+| 完整 unit／regression suite | **202 passed，8 warnings**；warnings 來自環境 pytest plugin 及既有 Transformer nested-tensor 設定 |
+| 原始來源 audit | 67 個 source files、4 個 verbatim functions，PASS |
+| Runtime | Python 3.12、PyTorch 2.8.0+cpu、NumPy 2.3.5 |
+| 四方法共同 runner | BAF、Motion Transformer、heatmap residual、heatmap per-step alpha 全部完成；沒有默默略過 methods |
+| Synthetic 訓練 | BAF 四階段各1 epoch、MT 1 epoch、原四種 adapters 各1 epoch、新 alpha gate 1 epoch |
+| 共同資料 | 每 horizon 181 origins，50／250／1000 ms，prediction margins 0／5／10／20°；每 method 2,172 rows |
+| 公平性 identities | 四方法的 protocol、origin、target、scene、RF cohort 一致 |
+| Standalone vs paired baselines | BAF／MT 的完整 origin／target identities 及所有 pooled ROI 指標一致；BAF不同 batch sizes 有約1.4e-8m／3.3e-6°的 pose metric 浮點差，不影響此 fixture 的 ROI |
+| Alpha-only targeted tests | 17 cases：原 BAF 數值對照、可微 frozen rollout、真正逐步 fusion、future-RF invariance、state／gap／fallback／batch composition 與數值邊界 |
+| Exact fallback | Residual 與 alpha 在額外2秒 RF delay 下均精確回到原 BAF 的 float64 poses 與 ROI metrics |
+| Shared reporting | 空集合、nonempty union／GT、原 recording macro、RF 去重、policy delay／matched cohort 檢查有回歸測試 |
+| 輸出圖表 | 8 張 horizon 圖 + 3 張 coverage–selected-count 曲線，共11張；各存PNG／PDF，預設 pooled，已檢視版面 |
+| Recorded resource guard | 保留原5秒disk／RAM／RSS監控及GPU reserve，config／cache／prepared路徑與正常／例外停止皆有測試 |
+
+新 alpha 零 correction 的 Torch rollout 在實際原 BAF models、50／250／1000 ms 下，套用精確 fallback **之前**，與原 runtime 的最大差異約 `3.58e-7 m`／`0.0004891°`。無 correction／RF缺測時直接恢復原始 float64 output，這些小數差不會變成零修正的 ROI gain。
+
+Smoke 的 checkpoint 允許選 epoch 0；程式不強制選訓練後的非零修正，也不以 synthetic accuracy 宣稱 CSI 有效。CUDA 訓練／推論、真實20261031資料的完整新實驗，以及 rendered SSIM 尚未在此次環境驗證。
+
+共同流程已納入原 `scripts/smoke_heatmap.py`，既有 GitHub workflow 會自動執行；不需要新的私人測資。
+
 ## 1. 版本與證據
 
 原 baseline commit：`2a75637da2e814205a56484a1e195c2922d9f9c0`。

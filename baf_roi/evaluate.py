@@ -7,10 +7,9 @@ import numpy as np
 import torch
 from .config import dump_json, validate_horizons
 from .data import Cache
-from .runtime import Predictor
+from .runtime import Predictor, observed_weights
 from .pose import ypr_to_quat, quaternion_error_deg
 from .roi import load_scene
-from .upstream_ops import compute_temporal_optimized_alpha
 
 
 def binary_counts(pred, truth):
@@ -111,8 +110,9 @@ def evaluate(cache_path, checkpoint, output, device='cpu', split='test', batch_s
                 synchronize(device); started = time.perf_counter()
                 if uses_confidence:
                     raw = predictor.confidence(histories)
-                    alpha = compute_temporal_optimized_alpha(raw, [{'file_name': record['key']}] * len(histories),
-                                                             alpha_state, predictor.mu, init_mode='alpha')
+                    alpha, state = observed_weights(raw, series.t[anchors], predictor.mu,
+                                                    series.max_gap, alpha_state.get(record['key']))
+                    alpha_state[record['key']] = state
                 if not eligible:
                     continue
                 targets = np.stack(targets)

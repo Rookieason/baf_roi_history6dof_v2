@@ -1,5 +1,19 @@
 # Evaluation：每個指標與對照到底在回答什麼？
 
+## 0. 共同入口與先前 PPT 的主評估
+
+四個正式 methods 為 `baf_roi`、`motion_transformer_roi`、`baf_roi_heatmap`、`baf_roi_heatmap_alpha`，由 `scripts/run_experiments.py --method ...` 指定，不指定就全部執行。模型實作分別留在四個套件；共同 metric engine 在 `roi_experiments/evaluation.py`。原 `baf_roi_heatmap.evaluation` 只保留相容入口。
+
+此版核對了 `CSI_ROI_Objective_Accuracy_Quality.pptx` 與 `20261016.pptx`：主表採逐 origin 的 **Mean IoU**、累計 TP/FP/FN 的 **Micro F1**。研究目標是
+
+$$
+\max_\theta mIoU_\theta(H)\quad\text{subject to}\quad\overline{SSIM}_\theta(H)\ge q_{min}.
+$$
+
+簡報未指定 `q_min` 數值。Coverage／selected count 是幾何診斷，減少 selected count 不是取代上述目標。正確 SSIM 必須在同一真實 future pose、同一 content frame、renderer、projection、解析度、point size 與 LoD 下，比較 selected rendering 和 full-content reference；不可拿 heatmap 或 ROI mask 的 SSIM 充數。這個 repository 沒有接上這組 rendered frames，所以共同報告明列 `rendered_quality.status=not_evaluated`。
+
+原 PPT 的 12,534 origins 是當次資料的數量，沒有硬編碼到新 evaluator。現在比較的是完整 origin identity：`protocol_id`、`origin_keys_sha256`、`targets_sha256`、scene／partition order、RF cohort 與 delivery delay。增加 horizons 必須對四個方法一起重新鎖定可用 origins。
+
 ## 1. 研究主張與證據分層
 
 最終 task 是 future ROI selection。前研究的 motion-capture 結果支持探索非頭部動態，但不是 CSI 已改善預測的證據；目前 smoke test 只證明軟體流程可執行。
@@ -28,7 +42,8 @@ IoU/F1、pose error、latency 分別是不同層的證據。沒有 rendered imag
 | HMD residual | `train --method residual --modality hmd` | 控制額外 correction head、task loss 與重新訓練的價值 |
 | RF residual | `train --method residual --modality rf` | 主要研究候選，和 HMD residual 比才是增量 sensing 檢驗 |
 | HMD expert gate | `train --method expert_gate --modality hmd` | 控制 terminal-expert-fusion adaptation 本身造成的改變 |
-| RF expert gate | `train --method expert_gate --modality rf` | 檢驗教授所舉的專家權重輔助方向是否足夠 |
+| RF expert gate | `train --method expert_gate --modality rf` | 兩條純 expert trajectories 的終點 mixture，比較不同 adaptation 方式 |
+| RF per-step alpha | `--method baf_roi_heatmap_alpha`（共同入口） | 只以簡單 RF 統計量修正 BAF rollout 內實際 α；161 個 trainable parameters |
 
 原 BAF 的 behavioral-confidence supervision 和新 adapters 的 pose/ROI task loss 不相同。因此 RF residual 勝過 BAF 時，不能直接把全部差距歸因於 RF。
 
@@ -89,9 +104,9 @@ $$
 ### Empty-set convention
 
 - P、G 都空：IoU=1，符合原 repo 的 set agreement convention。
-- F1 或 precision 分母為0：定義0，與原報告口徑一致。
-- 某個 aggregation 中 required count=0：coverage=null，不填1以假裝完整涵蓋。
-- 同時報告 empty_ground_truth_fraction 與 mean IoU on nonempty GT，避免大量空視野主導結果。
+- F1、precision、recall／coverage 分母為0：全部定義0，延續原 baseline 口徑；另外 `coverage_defined=false`，這種資料不能通過 coverage policy 的門檻選擇。
+- 同時報 `ground_truth_empty_count`、`both_empty_count`、`empty_ground_truth_fraction`。
+- `iou_mean_nonempty_union` 排除 P、G 都空的 origins，延續原 PPT／baseline；`iou_mean_nonempty_gt` 另外只保留 G 非空的 origins。兩者不同，不互相冒名。
 
 ### Pose diagnostic
 
@@ -103,11 +118,11 @@ Translation error=Euclidean distance，單位公尺；rotation 使用 sign-invar
 
 報告有三層：
 
-1. `pooled`：全部 origin counts 合併；長 recording 權重較大。
-2. `recording_macro`：每個 trajectory/recording 先計 metrics，再對 recordings 等權平均。**本版 checkpoint selection 與配對主比較採這層。** 若一個 recording 因 gaps 分成多個 cache trajectories，這些 segment 會各有 macro 權重；須在論文說明，或外部依真實 recording 重新 aggregate。
+1. `pooled`：Mean IoU 是全部 origins 的 IoU 算術平均；Micro F1／precision／recall 先累積 counts 再計算。長 recording 權重較大。**共同 summary 和預設圖表採此層，延續 PPT。**
+2. `recording_macro`：以 `session:source_sha256` 識別原始 HMD recording，先合併同檔的全部 gap segments，再對 recordings 等權平均。Adapter checkpoint selection 和 paired cluster CI 採此層，與主表的 pooled estimand 明確區分。
 3. `scenario_macro`：每個 scenario 內先對 recordings 平均，再對 scenarios 平均；scenario 都有有效 metadata 才輸出。
 
-Paired comparison 在同一 origin 計 `right IoU − left IoU`，再取 recording means。Bootstrap 以 `group_id` 為 cluster 整組抽樣，不獨立抽高度重疊的 windows。預設2000 resamples、seed42；輸出 percentile 95% CI。抽到某個 group 時，該 group 的全部 recording means 一起加入，所以 estimand 是 recording-macro，不是 subject-macro。
+Paired comparison 同時列出 `pooled_delta_iou` 與 `recording_macro_delta_iou`。後者在同一 origin 計 `right IoU − left IoU`，再取 recording means。Bootstrap 以 `group_id` 為 cluster 整組抽樣，不獨立抽高度重疊的 windows。預設2000 resamples、seed42；輸出 percentile 95% CI。抽到某個 group 時，該 group 的全部 recording means 一起加入，所以 estimand 是 recording-macro，不是 subject-macro。
 
 只有一個 group 時 CI=null，因為無法從單一 cluster 合理估計群體間不確定性。很少的 groups 仍會讓 CI 不穩，不能因為算得出來就宣稱統計充分。
 
@@ -115,7 +130,7 @@ Paired comparison 在同一 origin 計 `right IoU − left IoU`，再取 recordi
 
 ## 6. Horizons 與 seeds 的實驗安排
 
-保留先前主軸 50/100/150/200/250ms；400/600ms 用來檢查前研究較明顯的 translation 訊號，800/1000ms 作延伸。原論文與原 repo 已有 recursive rollout，延長 horizon 本身不是這次的新貢獻。
+目前 `recorded_20261031` profile 使用 50–1000ms、每50ms一個 horizon，共20個；共同入口也可用 `--horizons-ms` 明確指定。保留先前主軸 50/100/150/200/250ms；較長 horizons 檢查延伸預測。原論文與原 repo 已有 recursive rollout，延長 horizon 本身不是這次的新貢獻。
 
 預設 joint adapter 同時訓練所有指定 horizons，validation checkpoint 對 horizons 等權。若研究只在短 horizon 主張增益，應事先建立短 horizon 的實驗設定，不可看完 test 後才改 validation 權重挑版本。
 
@@ -136,7 +151,7 @@ m_h^*=\arg\min_{m\in\mathcal M}\overline{|P_{h,m}|}
 \quad\text{s.t.}\quad Coverage^{valid}_{micro}(h,m)\geq\rho.
 $$
 
-預設 ρ=0.95，只是可指定的 coverage 需求，不是畫質定律。各方法在 validation 選自己的 margin 後鎖定到 test；輸出實際 achieved test coverage 與 selected/FP/FN。若 validation 無候選可行，就報 infeasible。
+預設 ρ=0.95，只是可指定的 coverage 需求，不是畫質定律。Policy 同時鎖定 method checkpoint、experiment 與 delivery delay；不同 sensor delay 不會沿用成同一校準實驗。各方法在 validation 選自己的 margin 後鎖定到 test；輸出實際 achieved test coverage 與 selected/FP/FN。若 validation 無候選可行，就報 infeasible。
 
 **這不是數學上保證 test quality 的方法。** Test 未達95%就如實報告。即使兩者 coverage 差距看起來小，若要正式宣稱「non-inferior coverage」還需要事先設定 tolerance 並另外作 non-inferiority uncertainty 分析；本工具的 IoU bootstrap 不是該檢定。
 
@@ -144,7 +159,7 @@ $$
 
 每份 report 同時輸出 all origins 與 RF-available subset。主實驗不得只報 RF 可用的容易樣本而不交代 missing rate；secondary subset 是用來區分資料缺測和模型能力。
 
-`--delivery-delay-ms` 只延後 available time，不改 GT、origin 或 horizon。可事先指定0/50/100/200ms等 stress levels。延遲導致 stale window 時會精確 fallback 到 BAF；不把 future map 平移到過去補足。
+`--delivery-delay-ms` 只延後 available time，不改 GT、origin 或 horizon。配對比較要求兩邊使用同一 delay 與 RF availability；不同 delay 是獨立 stress 設定，不會默默用子集交集當正式比較。可事先指定0/50/100/200ms等 stress levels。延遲導致 stale window 時會精確 fallback 到 BAF；不把 future map 平移到過去補足。
 
 目前測試涵蓋：future raw CSI mutation 不影響先前 maps；future map mutation 不影響當前 inputs；超出 raw history 的 maps 排除；時計不確定性；資料重複跨 splits；missing fallback 的 pose/ROI 一致性。
 
@@ -160,13 +175,13 @@ $$
 
 這比只量 prediction 自己變動多少更合理，因為使用者真的轉頭時，完全不變的預測不是穩定而是落後。跨 gaps 不計 transition。這仍是診斷，不是「畫面 jitter 已改善」的直接測量；大量 unchanged cells 也會稀釋其值。
 
-Expert gate 的 per-horizon weight 可從 CSV 畫曲線。Residual 的 `gate` 欄是原 BAF α，不代表 residual 如何修正。原 α 是 weighted behavioral proxy 的輸出，不是校準的「Explorer 勝過 Focused」機率。
+Expert gate 的 per-horizon weight 可從 CSV 畫曲線。Residual 的 `gate` 欄是原 BAF α，不代表 residual 如何修正。新 alpha method 的已套 correction rows，`gate` 是該 horizon 上界 rollout step 的 α；fallback rows 保留 observed-origin α。用 `gate_kind` 與 `correction_applied` 區分，不能把 fallback 欄位當成真的 horizon gate。原 α 是 weighted behavioral proxy 的輸出，不是校準的「Explorer 勝過 Focused」機率。
 
 `oracle` 只比較有限 grid 的 terminal F/E mixtures，並把原 BAF 當候選保底。它以真實 ROI 選 candidate，是不可部署的 hindsight diagnostic。若有限 grid headroom 很小，表示這組候選不值得過度期待；不能斷言所有 continuous α 或逐步 α 方法的理論上界都小。
 
 ## 10. 預期圖表與可支持的結論
 
-`plot` 產生八張獨立圖：IoU、F1、coverage、FP、FN、selected、translation error、rotation error，全部清楚標 recording-macro。Curve 是描述性 mean，不自帶 CI；CI 來自 paired comparison JSON，不能把線粗細當不確定性。
+`python -m roi_experiments.plot` 產生八張 horizon 圖：IoU、F1、coverage、FP、FN、selected、translation error、rotation error，另為每個 horizon 產生 coverage–selected-count margin sweep；每張同時保存 PNG／PDF。預設 `--aggregation pooled --margin 0`，延續原 PPT；可明確選 recording_macro 或 scenario_macro。Macro F1 圖會註明是對 recordings/scenarios 的平均，不稱為全資料 pooled Micro F1。Margin sweep 調的是 prediction FoV，不是 neural confidence threshold。Curve 是描述性 mean，不自帶 CI；CI 來自 paired comparison JSON，不能把線粗細當不確定性。
 
 正式報告至少提供：共同 sample / recording / group 數；horizon curves；HMD vs RF paired ΔIoU 及 CI；固定 coverage policy 表；representation/metadata ablations；delay stress；硬體和 single-request latency 範圍。圖表未完成的項目不要寫成已觀察到。
 

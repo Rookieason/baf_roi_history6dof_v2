@@ -89,7 +89,7 @@ class HeatmapSeries:
 def empty_window(cfg):
     return {'maps': np.zeros((cfg.frames, 3, cfg.size, cfg.size), np.float32),
             'mask': np.zeros(cfg.frames, bool), 'timing': np.zeros((cfg.frames, 2), np.float32),
-            'rf_available': np.bool_(False)}
+            'rf_available': False}
 
 
 def encode_window(series, origin_s, normalizer, cfg, delivery_delay_s=0.):
@@ -121,7 +121,7 @@ def encode_window(series, origin_s, normalizer, cfg, delivery_delay_s=0.):
                                (queries[j] - origin_s) / cfg.map_history_s)
     result['maps'] = F.interpolate(torch.from_numpy(features), (cfg.size, cfg.size),
                                    mode='bilinear', align_corners=True).numpy()
-    result['rf_available'] = np.bool_(mask[-1] and mask.mean() >= cfg.min_valid_fraction)
+    result['rf_available'] = bool(mask[-1] and mask.mean() >= cfg.min_valid_fraction)
     return result
 
 
@@ -179,9 +179,16 @@ def load_rf_manifest(path, cache, cfg):
 
 def fit_normalizer(rf_manifest):
     values, source_keys = [], []
+    seen = set()
     for r in rf_manifest['records']:
         if r['split'] != 'train' or not r['file']:
             continue
+        # Several HMD trajectory segments may reference the same RF recording.
+        # Splitting a recording must not change its weight in normalization.
+        identity = r.get('sha256') or file_hash(r['file'])
+        if identity in seen:
+            continue
+        seen.add(identity)
         series = HeatmapSeries(r['file'], r['clock_offset_s'], r['clock_uncertainty_s'], rf_manifest.get('allow_exploratory', False))
         flat = series.db[series.valid].reshape(-1)
         if len(flat):
@@ -243,6 +250,14 @@ class ForecastDataset(Dataset):
 
     def __len__(self):
         return len(self.index)
+
+    def recording_id(self, record_index):
+        """Join segments from one source recording, including older preparations."""
+        record = self.records[int(record_index)]
+        if record.get('recording_id'):
+            return record['recording_id']
+        source = self.cache.records[record['cache_index']]
+        return f"{source['session']}:{source['source_sha256']}"
 
     def __getitem__(self, index):
         ri, oi = map(int, self.index[index])

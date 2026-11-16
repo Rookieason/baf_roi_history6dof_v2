@@ -1,5 +1,7 @@
 # Heatmap Extension：完整架構、資料契約與操作
 
+四種方法的主要入口是 [共同實驗 runner](README_EXPERIMENTS.md)；新增只改 α 的演算法見 [ALPHA](README_HEATMAP_ALPHA.md)。以下保留較低階的資料／模型 API。
+
 演算法與理由見 [ALGORITHM](README_HEATMAP_ALGORITHM.md)，實驗解讀見 [EVALUATION](README_HEATMAP_EVALUATION.md)。本文件說明真正實作的邊界，不把尚未接上的硬體或 renderer 畫成已完成系統。
 
 ## 1. 系統資料流
@@ -29,7 +31,7 @@ Online path 是：observed HMD + 已完成且可取得的 map → 原 BAF foreca
 ## 2. 檔案與 function 分工
 
 ```text
-baf_roi/                         原 HMD-only baseline，不修改
+baf_roi/                         原 HMD-only baseline；共用因果 observed-alpha helper
 motion_transformer_roi/          原 Motion Transformer，不修改
 vendor/                          原作者模型與 utilities，不修改
 baf_roi_heatmap/
@@ -42,10 +44,13 @@ baf_roi_heatmap/
   losses.py                      pose + soft ROI loss、精確 fallback
   train.py                       adapter 訓練與 validation checkpoint
   runtime.py                     online prediction API 與 batch-one benchmark
-  evaluation.py                  metrics、MT、margin policy、paired comparison
-  diagnostics.py                 hindsight candidate oracle、plots
+  evaluation.py                  共同 evaluator 的 compatibility imports
+  diagnostics.py                 hindsight candidate oracle、共同 plot 相容入口
   __main__.py                    CLI
+baf_roi_heatmap_alpha/            8-feature gate、逐步 BAF alpha、train/runtime
+roi_experiments/                  method registry、runner、共同 evaluation/plots
 scripts/
+  run_experiments.py              單入口 --method；省略即四方法
   smoke_heatmap.py                完整 synthetic integration test
   check_heatmap_reference.py      與使用者原 MUSIC.py 數值對照
 configs/heatmap_*.example.json    明示預設；不是硬體驗證結果
@@ -72,7 +77,7 @@ tests/heatmap/                    因果性、缺測、資料切分、數值測�
 | `losses.task_loss` | predictions + supervision → scalar loss | 最終 test quality 判定 |
 | `train.train` | train/valid data → adapter.pt | 用 test 選 epoch |
 | `runtime.HeatmapPredictor` | observed HMD/RF → future corrected poses | 自行讀未來 radio data |
-| `evaluation.evaluate` | exact origins/method → CSV/report | 靜默移除難預測樣本 |
+| `roi_experiments.evaluation.evaluate` | exact origins/method → CSV/report | 靜默移除難預測樣本 |
 | `evaluation.select_policy` | validation sweep → frozen margin policy | 根據 test 調門檻 |
 | `evaluation.compare` | matched method results → paired cluster CI | 把每個重疊 window 當獨立受試者 |
 | `diagnostics.oracle` | finite candidates + offline GT → headroom diagnostic | 可部署的 inference policy |
@@ -198,7 +203,7 @@ python -m baf_roi_heatmap prepare --cache cache/experiment01 --baseline runs/exp
 
 新 CLI 的 `--device` 使用 `cpu`、`cuda`、`cuda:0`，不解析 `auto`。要更換 scene 可加入 `--scene-config configs/scene.json`，內部路徑相對該 config 解析。所有 methods 在此 prepare 的相同 scene 上評估；training ROI loss 也使用它。
 
-### 7.4 訓練四種主要方法與 representation ablations
+### 7.4 原 heatmap adapter 的四種控制組與 representation ablations
 
 ```bash
 for method in residual expert_gate; do

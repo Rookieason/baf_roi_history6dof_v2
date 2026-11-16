@@ -43,7 +43,8 @@ def validation_iou(model, dataset, loader, device):
         tp, fp, fn, _ = roi_counts(dataset.scene.mask(p, q), truth)
         union = tp+fp+fn
         values = np.divide(tp, union, out=np.ones_like(tp, dtype=float), where=union != 0)
-        for ri, value in zip(ris, values): by_record[int(ri)].append(float(np.mean(value)))
+        for ri, value in zip(ris, values):
+            by_record[dataset.recording_id(int(ri))].append(float(np.mean(value)))
     return float(np.mean([np.mean(values) for values in by_record.values()]))
 
 

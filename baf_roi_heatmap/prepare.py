@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 from baf_roi.config import validate_horizons
 from baf_roi.data import Cache
-from baf_roi.runtime import Predictor
+from baf_roi.runtime import Predictor, observed_weights
 from baf_roi.pose import ypr_to_quat, quat_to_ypr, interpolate_predictions
 from baf_roi.roi import load_scene
 from baf_roi.upstream_ops import apply_decision_fusion
@@ -27,18 +27,6 @@ def fixed_forecast(predictor, histories, horizons, weight):
         ps.append(p); qs.append(q)
         h = np.concatenate((h[:, 1:], np.concatenate((p, quat_to_ypr(q)), axis=-1)[:, None]), axis=1)
     return interpolate_predictions(np.stack(ps, 1), np.stack(qs, 1), hs)
-
-
-def observed_weights(raw, times, mu, max_gap, state=None):
-    """Commit only actual decision-origin EMA; reset on gaps, never use rollout alpha."""
-    result = []
-    for value, timestamp in zip(np.asarray(raw).reshape(-1), times):
-        if state is not None and timestamp <= state[0]:
-            raise ValueError('Observed decision timestamps must strictly increase.')
-        alpha = float(value) if state is None or timestamp - state[0] > max_gap else mu * float(value) + (1 - mu) * state[1]
-        state = (float(timestamp), alpha)
-        result.append(alpha)
-    return np.asarray(result, np.float32), state
 
 
 def prepare(cache_path, baseline_checkpoint, rf_manifest_path, output, horizons=(50, 100, 150, 200, 250, 400, 600, 800, 1000),
@@ -98,6 +86,7 @@ def prepare(cache_path, baseline_checkpoint, rf_manifest_path, output, horizons=
         np.savez_compressed(destination, **merged)
         r = next(x for x in rf['records'] if x['key'] == record['key'])
         records.append({'key': record['key'], 'cache_index': ti, 'split': record['split'], 'session': record['session'],
+                        'recording_id': f"{record['session']}:{record['source_sha256']}",
                         'group_id': r['group_id'], 'scenario': r['scenario'], 'count': len(merged['anchors']),
                         'sha256': file_hash(destination)})
     for split in ('train', 'valid', 'test'):
@@ -108,7 +97,7 @@ def prepare(cache_path, baseline_checkpoint, rf_manifest_path, output, horizons=
                 'baseline_checkpoint': str(Path(baseline_checkpoint).resolve()), 'baseline_sha256': file_hash(baseline_checkpoint),
                 'split': cache.manifest['split'], 'horizons_ms': hs, 'input_config': asdict(cfg),
                 'rf_manifest': rf, 'normalizer': normalizer, 'scene': scene.snapshot(), 'records': records,
-                'notes': 'Frozen pretrained experts; cached targets are supervision only. Original BAF sources unchanged.'}
+                'notes': 'Frozen pretrained experts; cached targets are supervision only. Shared chronological observed-alpha protocol with gap resets.'}
     manifest['experiment_id'] = digest(manifest)
     write_json(out / 'manifest.json', manifest)
     return manifest

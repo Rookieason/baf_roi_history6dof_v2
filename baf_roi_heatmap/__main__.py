@@ -35,6 +35,8 @@ def parser():
     p = commands.add_parser('benchmark'); p.add_argument('--prepared', required=True); p.add_argument('--checkpoint', required=True); p.add_argument('--output', required=True)
     p.add_argument('--device', default='cpu'); p.add_argument('--count', type=int, default=50)
     p = commands.add_parser('plot'); p.add_argument('--evaluations', nargs='+', required=True); p.add_argument('--output', required=True)
+    p.add_argument('--aggregation', choices=['pooled', 'recording_macro', 'scenario_macro'], default='pooled')
+    p.add_argument('--margin', type=float, default=0.)
     return root
 
 
@@ -76,7 +78,7 @@ def main(argv=None):
         result = benchmark(a.prepared, a.checkpoint, a.output, a.device, a.count)
     else:
         from .diagnostics import plot
-        result = plot(a.evaluations, a.output)
+        result = plot(a.evaluations, a.output, a.aggregation, a.margin)
     print(json.dumps(result, indent=2, allow_nan=False))
 
 

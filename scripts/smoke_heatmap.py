@@ -124,11 +124,28 @@ def main(output, skip_plots=False):
         compare(out/('eval_'+method+'_hmd'), out/('eval_'+method+'_rf'), out/(method+'_paired.json'), bootstrap_samples=100)
         paired = json.loads((out/(method+'_paired.json')).read_text())
         assert all(r['cluster_percentile_ci95'] is None for r in paired['results'])
+    # Exercise the user's actual one-script entry point without retraining its
+    # BAF/MT/residual dependencies. Only the new per-step alpha gate is trained.
+    from roi_experiments.runner import parser as experiment_parser, run as run_experiment
+    unified = out/'unified'
+    run_experiment(experiment_parser().parse_args([
+        '--prepared', str(out/'prepared'), '--motion-transformer-checkpoint', str(mt),
+        '--heatmap-checkpoint', str(methods['residual_rf']), '--smoke-epochs', '1',
+        '--batch-size', '32', '--device', 'cpu', '--output', str(unified),
+    ]))
+    unified_manifest = json.loads((unified/'experiment.json').read_text())
+    assert unified_manifest['complete'] and len(unified_manifest['methods']) == 4
     evaluate(out/'prepared', out/'eval_delayed', checkpoint=methods['residual_rf'], delivery_delay_s=2.)
     a, b = read_rows(out/'eval_baf'), read_rows(out/'eval_delayed')
     assert len(a) == len(b)
     for original, delayed in zip(a, b):
         assert not delayed['rf_available']
+        for key in ('tp', 'fp', 'fn', 'tn', 'iou', 'translation_error_m', 'rotation_error_deg'):
+            assert original[key] == delayed[key], key
+    evaluate(out/'prepared', out/'eval_alpha_delayed',
+             alpha_checkpoint=unified_manifest['checkpoints']['baf_roi_heatmap_alpha'], delivery_delay_s=2.)
+    for original, delayed in zip(a, read_rows(out/'eval_alpha_delayed')):
+        assert not delayed['rf_available'] and not delayed['correction_applied']
         for key in ('tp', 'fp', 'fn', 'tn', 'iou', 'translation_error_m', 'rotation_error_deg'):
             assert original[key] == delayed[key], key
     evaluate(out/'prepared', out/'valid_margin', checkpoint=methods['residual_rf'], split='valid', margins=[0., 5., 20.])
@@ -138,14 +155,18 @@ def main(output, skip_plots=False):
         evaluate(out/'prepared', out/'test_policy', checkpoint=methods['residual_rf'], policy_path=out/'policy.json')
     oracle(out/'prepared', out/'oracle.json', grid_points=5)
     benchmark(out/'prepared', methods['residual_rf'], out/'benchmark.json', count=2)
+    plot_count = 0
     if not skip_plots:
-        plot([out/'eval_baf', out/'eval_residual_hmd', out/'eval_residual_rf'], out/'plots')
+        plot_result = plot([unified/'evaluations/test'/method for method in unified_manifest['methods']], out/'plots')
+        plot_count = plot_result['plots']
     dataset = ForecastDataset(out/'prepared', 'test')
     result = {'status': 'PASS', 'evidence_type': 'SYNTHETIC SOFTWARE INTEGRATION ONLY',
               'base_epochs_each_stage': 1, 'adapter_epochs': 1, 'adapter_methods': list(methods),
               'matched_origins_per_horizon': len(dataset), 'horizons_ms': frozen['horizons_ms'],
               'frozen_baselines': 4, 'matched_motion_transformer': True, 'exact_missing_rf_fallback': True,
-              'single_cluster_ci_correctly_undefined': True, 'plots': 0 if skip_plots else 8,
+              'unified_methods': unified_manifest['methods'], 'alpha_only_gate': True,
+              'exact_alpha_missing_rf_fallback': True,
+              'single_cluster_ci_correctly_undefined': True, 'plots': plot_count,
               'torch': str(torch.__version__), 'numpy': np.__version__, 'device': 'cpu'}
     write_json(out/'smoke_result.json', result); print(json.dumps(result, indent=2))
 
