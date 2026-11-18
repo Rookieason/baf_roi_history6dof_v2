@@ -116,7 +116,7 @@
     "valder_source_sha256": {
       "rt_data_processing/heatmap_generator.py": "0903d7fa4e4ab70f57c4afb2cc4bf388ba5b81c89789bd03d5c98234e9ae873d",
       "rt_data_processing/csi_merger.py": "fbee1f2490507f5bde90b04133a804b728178f00642d55aa94b4d5c39477b661",
-      "rt_data_processing/run_heatmap.py": "a78ff6712e5dae107e663a97eb6dc3fdb72633675497384ad805e2ad698e7c0f"
+      "rt_data_processing/run_heatmap.py": "00e63ddc7daa864448014950dfabece88677f814e646f1f1aa4db39dd546e048"
     },
     "excluded_session_reasons": {
       "20261031-084133_upperbody_part": "No precomputed maps fit the 29/30-second raw-support budget after accounting for actual multi-NIC delivery and interpolation. Excluded on input timing quality, before model fitting."
