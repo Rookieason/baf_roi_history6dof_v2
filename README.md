@@ -48,7 +48,7 @@ bash scripts/train_csi_20261031.sh
 bash scripts/train_csi_20261031.sh --method baf_roi_heatmap_alpha
 ```
 
-這兩個命令是替代用法，會各啟動一個背景實驗。腳本保留原 Python／`/mnt/codes` 路徑與 log 管理；在不同機器上先調整該檔開頭的設定。
+這兩個命令是替代用法，會各啟動一個背景實驗。腳本沿用原 Python 環境，但將訓練結果、checkpoint、log、cache 與暫存檔集中寫入 `/home/Projects/NSTC/EXTRA-DISC/Eason/tonic_nstc_csi_20261031/`；在不同機器上先調整該檔開頭的設定。
 
 ## 重用實驗與結果
 

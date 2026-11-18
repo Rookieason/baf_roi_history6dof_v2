@@ -6,7 +6,7 @@ set -euo pipefail
 
 # All machine-specific settings live here; no exported variables are required.
 PYTHON=/home/tonic/anaconda3/envs/bafroi/bin/python
-RUN_ROOT=/mnt/codes/tonic_nstc_csi_20261031
+RUN_ROOT=/home/Projects/NSTC/EXTRA-DISC/Eason/tonic_nstc_csi_20261031
 DEVICE=auto
 THREADS=2
 CONFIG=configs/recorded_20261031.json
