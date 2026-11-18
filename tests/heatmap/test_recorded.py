@@ -8,7 +8,7 @@ import pytest
 
 from baf_roi.data import discover_recordings, read_recording
 from baf_roi.pose import ypr_to_quat
-from baf_roi_heatmap.recorded import dependency_times, inspect_session, selected_map_indices
+from baf_roi_heatmap.recorded import dependency_times, inspect_session, selected_map_indices, session_settings
 
 ROOT = Path(__file__).resolve().parents[2]
 CONVENTION = 'unreal_world_cm_x_forward_y_right_z_up_pitch_positive_up'
@@ -96,12 +96,52 @@ def test_phantom_rows_are_not_selected_as_measurements():
 
 def test_fixed_split_is_complete_disjoint_and_stratified():
     split = json.loads((ROOT/'configs/splits_20261031.json').read_text())
-    assert [len(split[s]) for s in ('train','valid','test')] == [11,3,3]
+    assert [len(split[s]) for s in ('train','valid','test')] == [12,3,3]
     flat = sum(split.values(),[])
-    assert len(flat)==len(set(flat))==17 and all(s.startswith('20261031-') for s in flat)
+    added = '20260330-082303_record-5-minutes'
+    assert len(flat)==len(set(flat))==18 and added in split['train']
     assert '20261031-084133_upperbody_part' not in flat
     for sessions in split.values():
-        assert {s.split('_',1)[1] for s in sessions}=={'upperbody_part','lowerbody_part','longlong'}
+        assert {s.split('_',1)[1] for s in sessions if s != added}=={'upperbody_part','lowerbody_part','longlong'}
+
+
+def test_additional_session_uses_its_topic_and_is_required(tmp_path):
+    cfg = {'recording_topic':'sensor.full.50010', 'session_prefix':'20261031',
+           'additional_sessions':['20260330_old'],
+           'session_overrides':{'20260330_old':{'recording_topic':'hmd.50000'}}}
+    for session, topic in [('20261031_new','sensor.full.50010'), ('20260330_old','hmd.50000'),
+                           ('20260330_unselected','hmd.50000')]:
+        write_csv(tmp_path/'db'/session/topic/'x.csv', [sensor_row(.01)])
+    assert set(discover_recordings(tmp_path, cfg)) == {'20261031_new', '20260330_old'}
+    cfg['additional_sessions'].append('missing')
+    with pytest.raises(ValueError, match='Additional sessions missing'):
+        discover_recordings(tmp_path, cfg)
+
+
+def test_flat_hmd_uses_collector_clock_and_cm(tmp_path):
+    rows = []
+    for t in (.01, .06):
+        payload = {'pos_x_cm':100, 'pos_y_cm':200, 'pos_z_cm':150,
+                   'yaw_deg':20, 'pitch_deg':10, 'roll_deg':-5,
+                   'ts_iso':f'2026-10-31T00:00:00.{int(t*1000):03d}Z'}
+        rows.append({'recv_unix':str(1793404800+t+.02), 'payload_json':json.dumps(payload)})
+    path = tmp_path/'pose.csv'; write_csv(path, rows)
+    t, x, audit = read_recording(path, {'position_unit':'cm','payload_format':'hmd_flat_cm'})
+    np.testing.assert_allclose(x, [[1,2,1.5,20,10,-5]]*2)
+    assert t[0] == pytest.approx(1793404800+.03, abs=1e-6)
+    assert audit['timestamp_domain'] == 'collector_receive_unix'
+
+
+def test_generation_override_preserves_other_sessions():
+    cfg = json.loads((ROOT/'configs/recorded_20261031.json').read_text())
+    settings = cfg['recorded_heatmaps']
+    old = session_settings(settings, '20260330-082303_record-5-minutes')
+    base = session_settings(settings, '20261031_fixture')
+    assert old['generation']['subcarriers'] == 2025
+    assert old['generation']['center_mhz'] == 5570
+    assert old['generation']['source_shape'] == base['generation']['source_shape'] == [90,130]
+    assert base['generation']['subcarriers'] == settings['generation']['subcarriers'] == 1001
+    assert not base.get('allow_missing_run_params', False)
 
 
 def test_import_uses_collector_clock_and_checks_grid(tmp_path):
@@ -122,3 +162,10 @@ def test_import_uses_collector_clock_and_checks_grid(tmp_path):
     settings['generation']['source_shape']=[77,51]
     with pytest.raises(ValueError,match='AoA-ToF shape'):
         inspect_session(tmp_path,session,settings)
+    settings['generation']['source_shape']=[90,130]
+    (folder/'run_params.json').unlink()
+    with pytest.raises(ValueError,match='missing run_params.json'):
+        inspect_session(tmp_path,session,settings)
+    settings['allow_missing_run_params']=True
+    audit=inspect_session(tmp_path,session,settings)[-1]
+    assert 'historical run_params.json absent' in audit['parameter_source']

@@ -1,6 +1,6 @@
-"""Import existing valder AoA-ToF maps and train on one explicitly selected date.
+"""Import existing valder AoA-ToF maps for a date and explicitly added sessions.
 
-No CSI/heatmap generation and no old-day checkpoints are used. Input timestamps
+No CSI/heatmap generation and no previous checkpoints are used. Input timestamps
 are collector reception times; they are not asserted to be radio/HMD capture times.
 """
 import argparse
@@ -147,7 +147,7 @@ def profile(path):
     cfg = load_config(path)
     settings = cfg['recorded_heatmaps']
     if cfg['data'].get('session_prefix') != '20261031' or cfg['data'].get('payload_format') != 'sensor_full_v2':
-        raise ValueError('This profile exclusively trains on 20261031 sensor.full v2 recordings.')
+        raise ValueError('This profile requires the 20261031 base selection and sensor.full v2 recordings; additional sessions must meet the same contracts.')
     cfg['scene']['approximation_note'] = 'Existing training proxy: 8^3 bounding-cube centers per object; not the server 48^3 visibility/occlusion renderer.'
     InputConfig(**settings['input_config']).validate()
     return cfg
@@ -155,8 +155,16 @@ def profile(path):
 
 def inspect_session(dataset, session, settings):
     folder = dataset/'intermediates'/session
-    params = read_json(folder/'run_params.json')
     expected = settings['generation']
+    params_path = folder/'run_params.json'
+    if params_path.exists():
+        params = read_json(params_path)
+        parameter_source = 'run_params.json'
+    elif settings.get('allow_missing_run_params', False):
+        params = {k: expected[k] for k in ('subcarriers', 'center_mhz', 'antenna_order', 'past_only')}
+        parameter_source = 'Explicit profile settings; historical run_params.json absent. Requires numeric generation sample verification.'
+    else:
+        raise ValueError(f'{session}: missing run_params.json; explicit reviewed session settings required.')
     for key in ('subcarriers', 'center_mhz', 'antenna_order'):
         if params.get(key) != expected[key]:
             raise ValueError(f'{session}: {key} disagrees with the training profile: {params.get(key)}')
@@ -186,10 +194,17 @@ def inspect_session(dataset, session, settings):
     if list(shape) != expected['source_shape']:
         raise ValueError(f'{session}: expected AoA-ToF shape {expected["source_shape"]}, got {shape}')
     return path, matched_path, starts, ends, selected, {
-        'session': session, 'parameters': params, 'source_frames': len(matched), 'source_shape': list(shape),
+        'session': session, 'parameters': params, 'parameter_source': parameter_source,
+        'source_frames': len(matched), 'source_shape': list(shape),
         'observed_frames': int(observed.sum()), 'selected_maps': len(selected),
         'selected_support_span_p50_p99_s': np.percentile((ends-starts)[selected], [50,99]).tolist(),
         'map_start_s': float(ends[selected[0]]), 'map_end_s': float(ends[selected[-1]])}
+
+
+def session_settings(settings, session):
+    override = settings.get('session_overrides', {}).get(session, {})
+    return {**settings, **override,
+            'generation': {**settings['generation'], **override.get('generation', {})}}
 
 
 def prepare_recorded(config_path, output):
@@ -224,14 +239,15 @@ def prepare_recorded(config_path, output):
     tau = np.linspace(0, 6.45/299792458., input_cfg.size)
     for session in sorted(split_config):
         check_resources(out)
-        path, matched_path, starts, ends, selected, audit = inspect_session(dataset, session, settings)
-        audit['generation_sample_check'] = verify_generation_sample(dataset, session, settings)
+        selected_settings = session_settings(settings, session)
+        path, matched_path, starts, ends, selected, audit = inspect_session(dataset, session, selected_settings)
+        audit['generation_sample_check'] = verify_generation_sample(dataset, session, selected_settings)
         maps = np.empty((len(selected), input_cfg.size, input_cfg.size), np.float32)
         with zipfile.ZipFile(path) as archive:
             for j, i in enumerate(selected):
                 with archive.open(f'{i}.npy') as stream:
                     spectrum = np.lib.format.read_array(stream, allow_pickle=False)
-                if not np.isfinite(spectrum).all() or list(spectrum.shape) != settings['generation']['source_shape']:
+                if not np.isfinite(spectrum).all() or list(spectrum.shape) != selected_settings['generation']['source_shape']:
                     raise ValueError(f'{session}, frame {i}: invalid spectrum.')
                 maps[j] = F.interpolate(torch.from_numpy(spectrum.astype(np.float32))[None,None],
                                         (input_cfg.size, input_cfg.size), mode='bilinear', align_corners=True)[0,0].numpy()
@@ -241,8 +257,8 @@ def prepare_recorded(config_path, output):
                     'source_npz_sha256': file_hash(path), 'matched_csv_sha256': file_hash(matched_path),
                     'raw_sha256': file_hash(dataset/'intermediates'/session/'merged_csi'/f'{session}_merged.npz'),
                     'raw_source_kind': 'valder_merged_csi',
-                    'session': session, 'generation_parameters': settings['generation'],
-                    'historical_settings_evidence': 'run_params.json, pinned generator, and one recomputed numeric frame per session; no historical full generator snapshot exists',
+                    'session': session, 'generation_parameters': selected_settings['generation'],
+                    'historical_settings_evidence': audit['parameter_source'] + '; pinned generator and one recomputed numeric frame per session; no historical full generator snapshot exists',
                     'regridding': 'dB bilinear align_corners=True to training size; no heatmap regeneration',
                     'map_rate_hz_max': settings['map_rate_hz'], 'reception_clock_only': True}
         destination = maps_dir/(session+'.npz')
@@ -283,10 +299,12 @@ def prepare_recorded(config_path, output):
         count['fraction'] = count['available']/max(count['origins'],1)
         if count['fraction'] < settings['minimum_rf_coverage']:
             raise ValueError(f'{name} RF coverage is insufficient: {count}')
-    report = {'dataset_prefix': '20261031', 'sessions': audits, 'split': pose_manifest['split'],
+    report = {'dataset_prefix': cfg['data']['session_prefix'],
+              'additional_sessions': cfg['data'].get('additional_sessions', []),
+              'sessions': audits, 'split': pose_manifest['split'],
               'excluded_sessions': settings.get('excluded_session_reasons', {}),
               'eligible_expert_samples': eligible, 'rf_coverage': coverage, 'resources': check_resources(out),
-              'interpretation': 'Session holdout within this recording day; subject identity unknown, no unseen-subject claim. ROI uses the explicitly retained uniform-grid proxy.',
+              'interpretation': 'Session holdout across the explicitly selected recordings; subject identity unknown, no unseen-subject or unseen-day claim. ROI uses the explicitly retained uniform-grid proxy.',
               'profile_sha256': file_hash(config_path), 'final_model': 'BAF + HMD/CSI AoA-ToF residual adapter'}
     write_json(out/'data_audit.json', report)
     dump_json(out/'resolved_config.json', cfg)
@@ -326,7 +344,9 @@ def train_recorded(config_path, output, device):
     print('STAGE 4/4: evaluate frozen selected checkpoint on held-out test sessions', flush=True)
     evaluate(out/'prepared', out/'test_csi', checkpoint=checkpoint, device=device)
     write_json(out/'complete.json', {'adapter': checkpoint, 'experts': str(baseline), 'device': device,
-                                    'dataset_prefix': '20261031', 'model': 'HMD+CSI residual adapter'})
+                                    'dataset_prefix': cfg['data']['session_prefix'],
+                                    'additional_sessions': cfg['data'].get('additional_sessions', []),
+                                    'model': 'HMD+CSI residual adapter'})
     print('TRAINING COMPLETE', checkpoint, flush=True)
 
 

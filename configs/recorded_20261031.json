@@ -9,6 +9,15 @@
     "payload_format": "sensor_full_v2",
     "recording_topic": "sensor.full.50010",
     "session_prefix": "20261031",
+    "additional_sessions": [
+      "20260330-082303_record-5-minutes"
+    ],
+    "session_overrides": {
+      "20260330-082303_record-5-minutes": {
+        "recording_topic": "hmd.50000",
+        "payload_format": "hmd_flat_cm"
+      }
+    },
     "strict_schema": true,
     "exclude_sessions": [
       "20261031-084133_upperbody_part"
@@ -53,6 +62,16 @@
     "max_distance_m": null
   },
   "recorded_heatmaps": {
+    "session_overrides": {
+      "20260330-082303_record-5-minutes": {
+        "allow_missing_run_params": true,
+        "generation": {
+          "subcarriers": 2025,
+          "center_mhz": 5570,
+          "subcarrier_spacing_hz": 2500000
+        }
+      }
+    },
     "representation": "aoa_tof",
     "epochs": 20,
     "map_rate_hz": 30,

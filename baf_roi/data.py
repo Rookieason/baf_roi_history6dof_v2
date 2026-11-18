@@ -68,6 +68,11 @@ def read_recording(path, data_cfg):
                     recorded_q /= np.linalg.norm(recorded_q)
                     if not np.isfinite(recorded_q).all() or abs(recorded_q @ ypr_to_quat(rot)) < np.cos(np.deg2rad(.2) / 2):
                         raise ValueError('Canonical HMD quaternion disagrees with the training yaw/pitch/roll convention.')
+                elif data_cfg.get('payload_format') == 'hmd_flat_cm':
+                    if data_cfg['position_unit'] != 'cm':
+                        raise ValueError('hmd_flat_cm requires position_unit=cm.')
+                    pos = [payload[k] for k in ('pos_x_cm', 'pos_y_cm', 'pos_z_cm')]
+                    rot = [payload[k] for k in ('yaw_deg', 'pitch_deg', 'roll_deg')]
                 else:
                     pos = payload['pos']
                     rot = payload.get('rot_deg')
@@ -79,11 +84,12 @@ def read_recording(path, data_cfg):
                 if pose.shape != (6,) or not np.isfinite(pose).all():
                     raise ValueError('Pose must be six finite scalars.')
                 ts = payload.get('ts_utc')
-                if data_cfg.get('payload_format') == 'sensor_full_v2':
+                if data_cfg.get('payload_format') in ('sensor_full_v2', 'hmd_flat_cm'):
                     # CSI CSV recv_unix and this field share the collector clock.
                     # This is a reception-time experiment, not capture-clock calibration.
                     ts = row['recv_unix']
-                    delay = float(ts) - parse_timestamp(payload['rx_ts_iso'])
+                    receiver_ts = 'ts_iso' if data_cfg['payload_format'] == 'hmd_flat_cm' else 'rx_ts_iso'
+                    delay = float(ts) - parse_timestamp(payload[receiver_ts])
                     if not -.002 <= delay <= data_cfg.get('max_receiver_to_recorder_delay_s', .5):
                         raise ValueError('Invalid HMD receiver-to-recorder delay; check reception clocks.')
                     reception_delays.append(delay)
@@ -177,21 +183,34 @@ def discover_recordings(root, data_cfg=None):
     topic = data_cfg.get('recording_topic', 'agent6*')
     prefix = data_cfg.get('session_prefix', '')
     excluded = set(data_cfg.get('exclude_sessions', []))
+    additional = data_cfg.get('additional_sessions', [])
+    if (not isinstance(additional, list)
+            or any(not isinstance(s, str) or not s or s in ('.', '..') or '/' in s or '\\' in s
+                   for s in additional)):
+        raise ValueError('data.additional_sessions must be a list of session directory names.')
+    additional = set(additional)
+    if additional & excluded:
+        raise ValueError('Additional sessions cannot also be excluded.')
     db = Path(root) / 'db'
     if not db.is_dir():
         raise ValueError(f'Dataset must contain db/<session>/agent6*: {db}')
     result = {}
     for session in sorted(db.iterdir()):
-        if not session.is_dir() or not session.name.startswith(prefix) or session.name in excluded:
+        if (not session.is_dir() or session.name in excluded
+                or not (session.name.startswith(prefix) or session.name in additional)):
             continue
         paths = []
-        for candidate in sorted(session.glob(topic)):
+        session_topic = data_cfg.get('session_overrides', {}).get(session.name, {}).get('recording_topic', topic)
+        for candidate in sorted(session.glob(session_topic)):
             if candidate.is_file() and candidate.suffix.lower() == '.csv':
                 paths.append(candidate)
             elif candidate.is_dir():
                 paths.extend(sorted(candidate.rglob('*.csv')))
         if paths:
             result[session.name] = sorted(set(paths))
+    missing = additional - result.keys()
+    if missing:
+        raise ValueError(f'Additional sessions missing {topic} CSV recordings below {db}: {sorted(missing)}')
     if not result:
         raise ValueError(f'No {topic} CSV recordings for prefix {prefix!r} found below {db}.')
     return result
@@ -250,7 +269,8 @@ def prepare(cfg, output):
     for session, files in recordings.items():
         for path in files:
             try:
-                t, pose, audit = read_recording(path, cfg['data'])
+                session_cfg = {**cfg['data'], **cfg['data'].get('session_overrides', {}).get(session, {})}
+                t, pose, audit = read_recording(path, session_cfg)
             except ValueError:
                 if cfg['data'].get('strict_schema', False):
                     raise
