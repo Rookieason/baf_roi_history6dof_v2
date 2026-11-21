@@ -11,16 +11,20 @@ from .data import ForecastDataset
 from .model import ForecastAdapter
 from .losses import task_loss, numpy_prediction
 from .evaluation import to_device, roi_counts
+from .training_utils import CheckpointSelection, recording_weights
 
 
-def train_epoch(model, loader, optimizer, scene, device, roi_weight):
+def train_epoch(model, loader, optimizer, scene, device, roi_weight,
+                objective='pose_roi', weights=None):
     model.train()
     total, count = 0., 0
     for batch in loader:
         inputs, labels = to_device(batch['inputs'], device), to_device(batch['supervision'], device)
         optimizer.zero_grad(set_to_none=True)
         prediction = model(inputs)
-        loss = task_loss(prediction, labels, scene, roi_weight=roi_weight)
+        sample_weight = weights[batch['record_index']] if weights is not None else None
+        loss = task_loss(prediction, labels, scene, roi_weight=roi_weight,
+                         objective=objective, sample_weight=sample_weight)
         if not torch.isfinite(loss): raise FloatingPointError('Non-finite adapter loss.')
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 5., error_if_nonfinite=True)
@@ -48,12 +52,16 @@ def validation_iou(model, dataset, loader, device):
     return float(np.mean([np.mean(values) for values in by_record.values()]))
 
 
-def train(prepared, output, config=None, epochs=20, batch_size=64, lr=1e-3, seed=42, device='cpu', roi_weight=.25):
+def train(prepared, output, config=None, epochs=20, batch_size=64, lr=1e-3, seed=42, device='cpu', roi_weight=.25,
+          *, objective='roi_iou', aggregation='origin'):
     config = (config or ModelConfig()).validate()
     if epochs < 1 or batch_size < 1 or not math.isfinite(lr) or lr <= 0 or not math.isfinite(roi_weight) or roi_weight < 0:
         raise ValueError('Invalid training hyperparameters.')
     seed_all(seed)
     training, validation = ForecastDataset(prepared, 'train'), ForecastDataset(prepared, 'valid')
+    weights = recording_weights(training, aggregation)
+    if objective not in ('pose_roi', 'roi_iou'):
+        raise ValueError('Unknown training objective.')
     if config.modality == 'rf' and not training.manifest['normalizer']['sample_count']:
         raise ValueError('There are no valid training RF maps.')
     if config.modality == 'rf' and not any(bool(training[i]['inputs']['rf_available']) for i in range(len(training))):
@@ -64,23 +72,27 @@ def train(prepared, output, config=None, epochs=20, batch_size=64, lr=1e-3, seed
     model = ForecastAdapter(config).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     out = new_directory(output)
-    log, best = [], -float('inf')
+    log = []
+    selection = CheckpointSelection(out, 'adapter.pt')
     for epoch in range(epochs + 1):
-        loss = train_epoch(model, train_loader, optimizer, training.scene, device, roi_weight) if epoch else None
+        loss = train_epoch(model, train_loader, optimizer, training.scene, device, roi_weight,
+                           objective, weights) if epoch else None
         score = validation_iou(model, validation, valid_loader, device)
         log.append({'epoch': epoch, 'train_loss': loss, 'validation_recording_macro_iou': score})
         print(f'CSI adapter epoch={epoch}/{epochs} train_loss={loss} validation_IoU={score:.6f}', flush=True)
-        if score > best + 1e-12:
-            best = score
-            bundle = {'format_version': 1, 'model': model.state_dict(), 'model_config': asdict(config),
+        bundle = {'format_version': 1, 'model': model.state_dict(), 'model_config': asdict(config),
                       'experiment_id': training.manifest['experiment_id'], 'baseline_sha256': training.manifest['baseline_sha256'],
                       'horizons_ms': training.horizons, 'input_config': training.manifest['input_config'],
                       'grid_id': training.rf['grid_id'], 'allow_exploratory': training.rf.get('allow_exploratory', False),
                       'normalizer': training.manifest['normalizer'], 'selected_epoch': epoch,
                       'validation_recording_macro_iou': score, 'seed': seed, 'roi_weight': roi_weight,
+                      'objective': objective, 'aggregation': aggregation,
+                      'rf_age_basis': training.rf_age_basis,
                       'selection': 'validation recording-macro IoU, equally weighted trained horizons; epoch zero is eligible'}
-            torch.save(bundle, out/'adapter.pt')
+        status = selection.update(bundle)
         write_json(out/'training.json', {'specification': model.specification(), 'history': log,
                                         'epochs': epochs, 'batch_size': batch_size, 'learning_rate': lr, 'seed': seed,
+                                        'objective': objective, 'aggregation': aggregation, **status,
                                         'warning': 'No evidence of CSI gain until matched real held-out recordings are evaluated.'})
+    print(f'CSI adapter selection: {status}', flush=True)
     return str(out/'adapter.pt')

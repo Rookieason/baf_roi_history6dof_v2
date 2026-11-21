@@ -5,7 +5,7 @@ summary supplies a bounded log-odds offset to each *forecast* fusion weight.
 Only the gate is trained; there is no position/rotation residual head, no new
 pose encoder, no endpoint mixing, and no future RF input.
 """
-from contextlib import nullcontext
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 import math
 import torch
@@ -135,6 +135,27 @@ def slerp(q0, q1, weight):
     return mixed / (torch.linalg.vector_norm(mixed, dim=-1, keepdim=True)+1e-8)
 
 
+@contextmanager
+def frozen_rnn_input_grad(module, enabled):
+    """cuDNN input gradients with exactly the frozen RNN's dropout-free behavior.
+
+    cuDNN needs its training reserve for backward, even with frozen parameters.
+    Only RNN flags change during this call: BatchNorm and other dropout modules
+    remain in eval, and RNN dropout is zero as it is during evaluation.
+    """
+    states = []
+    if enabled:
+        for child in module.modules():
+            if isinstance(child, nn.RNNBase):
+                states.append((child, child.training, child.dropout))
+                child.training, child.dropout = True, 0.
+    try:
+        yield
+    finally:
+        for child, training, dropout in states:
+            child.training, child.dropout = training, dropout
+
+
 class AlphaFusion(nn.Module):
     def __init__(self, baseline, config=None):
         super().__init__()
@@ -160,7 +181,8 @@ class AlphaFusion(nn.Module):
         pose = torch.cat(((history[..., :3]-self.mean)/self.std,
                           ypr_to_quaternion(history[..., 3:])), -1).float()
         raw = self.experts['confidence'](conf)['confidence'].reshape(-1)
-        focused = self.experts['focused'](pose)
+        with frozen_rnn_input_grad(self.experts['focused'], self.training and pose.is_cuda and torch.is_grad_enabled()):
+            focused = self.experts['focused'](pose)
         explorer = self.experts['explorer'](pose, None)
         # Match the author's float32 de-normalization before geometry arithmetic.
         mean, std = self.mean.float(), self.std.float()
@@ -196,19 +218,15 @@ class AlphaFusion(nn.Module):
         quaternions = [ypr_to_quaternion(history[:, -1, 3:])]
         weights = []
         alpha = inputs['alpha'].float()
-        # cuDNN forbids backward through an eval-mode RNN. Native PyTorch permits
-        # input gradients while retaining the frozen expert's evaluation behavior.
-        context = torch.backends.cudnn.flags(enabled=False) if self.training and history.is_cuda else nullcontext()
-        with context:
-            for step in range(steps):
-                raw, fp, fq, ep, eq = self._step(history)
-                prior = alpha if step == 0 else self.mu*raw+(1-self.mu)*alpha
-                alpha = correct_alpha(prior, delta)
-                p = (1-alpha[:, None])*fp+alpha[:, None]*ep
-                q = slerp(fq, eq, alpha)
-                positions.append(p.double()); quaternions.append(q.double()); weights.append(alpha)
-                generated = torch.cat((p.double(), quaternion_to_ypr(q.double())), -1)
-                history = torch.cat((history[:, 1:], generated[:, None]), 1)
+        for step in range(steps):
+            raw, fp, fq, ep, eq = self._step(history)
+            prior = alpha if step == 0 else self.mu*raw+(1-self.mu)*alpha
+            alpha = correct_alpha(prior, delta)
+            p = (1-alpha[:, None])*fp+alpha[:, None]*ep
+            q = slerp(fq, eq, alpha)
+            positions.append(p.double()); quaternions.append(q.double()); weights.append(alpha)
+            generated = torch.cat((p.double(), quaternion_to_ypr(q.double())), -1)
+            history = torch.cat((history[:, 1:], generated[:, None]), 1)
         ps, qs, gates = [], [], []
         for milliseconds in hs_ms:
             t = milliseconds*30/1000

@@ -262,6 +262,14 @@ def evaluate(prepared, output, checkpoint=None, baseline='baf', split='test', de
                                    'reason': 'Requires matched rendered frames at the actual future pose; geometric coverage is not SSIM.'},
               'evidence': 'Geometric ROI proxy only. No rendered-quality, bitrate or realtime claim.',
               'rf_physical_axes_verified': bool(dataset.rf['grid_id']) and all(r['physical_axes_verified'] for r in dataset.rf['records'] if r['file'])}
+    report['checkpoint_selection'] = ({
+        'selected_epoch': bundle.get('selected_epoch'),
+        'status': 'baseline_retained' if bundle.get('selected_epoch') == 0 else 'trained_correction_selected',
+        'validation_recording_macro_iou': bundle.get('validation_recording_macro_iou'),
+        'objective': bundle.get('objective', 'pose_roi'),
+        'aggregation': bundle.get('aggregation', 'origin'),
+    } if bundle else None)
+    report['correction_applied_fraction'] = float(np.mean([r['correction_applied'] for r in rows]))
     write_json(out/'report.json', report)
     return report
 

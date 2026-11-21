@@ -26,6 +26,17 @@ def report(method='baf'):
             'summaries': {'50ms_margin0': {'all': {'pooled': pooled}}}}
 
 
+def test_summary_explains_identical_baseline_retained_adapter(tmp_path):
+    baseline = report()
+    adapter = report('heatmap')
+    adapter['checkpoint_selection'] = {'selected_epoch': 0, 'status': 'baseline_retained'}
+    adapter['correction_applied_fraction'] = 0.
+    result = runner.write_summary({'baf_roi': baseline, 'baf_roi_heatmap': adapter}, tmp_path)
+    row = result['rows'][1]
+    assert row['selected_epoch'] == 0 and row['selection_status'] == 'baseline_retained'
+    assert row['correction_applied_fraction'] == 0. and row['delta_iou_mean_vs_baf'] == 0.
+
+
 def test_all_selection_is_explicit_and_no_unknown_is_silently_dropped():
     assert resolve_methods() == list(METHODS)
     assert resolve_methods(['all']) == list(METHODS)

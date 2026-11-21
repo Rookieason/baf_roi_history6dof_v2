@@ -88,6 +88,15 @@ def test_centered_background_is_delayed_until_its_last_packet_arrives():
     assert dependency_times(rows, clocks, half_window=2)[1][4] == .5
 
 
+def test_center_measurement_time_is_separate_from_centered_background_completion():
+    rows = matched_rows(9)
+    clocks = {str(nic): {str(i): i*.01 for i in range(9)} for nic in range(1,5)}
+    starts, ends, _, measurement = dependency_times(rows, clocks, half_window=2, return_measurement=True)
+    assert measurement[4] == pytest.approx(.04)
+    assert ends[4] == pytest.approx(.06)
+    assert starts[4] <= measurement[4] <= ends[4]
+
+
 def test_phantom_rows_are_not_selected_as_measurements():
     ends = np.array([.1,.15,.2,.25]); starts = ends-.05
     ids = selected_map_indices(starts, ends, np.array([True,False,True,True]), max_rate_hz=30)

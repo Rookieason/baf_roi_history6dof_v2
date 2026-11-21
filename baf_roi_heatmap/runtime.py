@@ -55,7 +55,8 @@ class HeatmapPredictor:
                         self.base.data_config['max_gap_ms']/1000)
         history = series.history(len(ts)-1)
         _, hmd = model_inputs(history, self.base.stats)
-        window = encode_window(rf_series, float(ts[-1]), self.bundle['normalizer'], self.cfg, delivery_delay_s)
+        window = encode_window(rf_series, float(ts[-1]), self.bundle['normalizer'], self.cfg, delivery_delay_s,
+                               self.bundle.get('rf_age_basis', 'support_end'))
         result['rf_available'] = bool(window['rf_available'])
         result['adapted'] = False
         if self.model.config.modality == 'rf' and not window['rf_available']:

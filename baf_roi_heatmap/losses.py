@@ -32,21 +32,34 @@ def soft_visibility(p, q, scene, angular_temperature=.02, distance_temperature_m
     return result
 
 
-def task_loss(prediction, supervision, scene, roi_weight=.25, regularization=.001):
+def task_loss(prediction, supervision, scene, roi_weight=.25, regularization=.001,
+              *, objective='pose_roi', sample_weight=None):
+    if objective not in ('pose_roi', 'roi_iou'):
+        raise ValueError('objective must be pose_roi or roi_iou.')
     p, q = prediction['p'], unit_quaternion(prediction['q'])
     target_p, target_q = supervision['target_p'], unit_quaternion(supervision['target_q'])
-    translation = F.smooth_l1_loss(p / .1, target_p / .1)
+    translation = F.smooth_l1_loss(p / .1, target_p / .1, reduction='none').mean((-2, -1))
     dot = (q * target_q).sum(-1).clamp(-1, 1)
     # Sign invariant, finite-gradient small-angle surrogate, approximately angle^2 / (10deg)^2.
-    rotation = (4 * (1-dot.square()) / math.radians(10)**2).mean()
+    rotation = (4 * (1-dot.square()) / math.radians(10)**2).mean(-1)
     probability = soft_visibility(p, q, scene)
     truth = supervision['target_mask']
     tp = (probability * truth).sum(-1)
     fp = (probability * (1-truth)).sum(-1)
     fn = ((1-probability) * truth).sum(-1)
     tversky = 1 - (tp+1e-6) / (tp+.3*fp+.7*fn+1e-6)
-    roi = torch.where(truth.sum(-1) > 0, tversky, probability.mean(-1)).mean()
-    return translation + rotation + roi_weight*roi + regularization*prediction['penalty'].mean()
+    if objective == 'roi_iou':
+        # Match the unexpanded hard-IoU checkpoint criterion, including empty GT.
+        # The legacy Tversky (.3 FP / .7 FN) optimizes a different tradeoff.
+        roi = 1 - (tp+1e-6)/(tp+fp+fn+1e-6)
+    else:
+        roi = tversky
+    roi = torch.where(truth.sum(-1) > 0, roi, probability.mean(-1)).mean(-1)
+    value = roi if objective == 'roi_iou' else translation + rotation + roi_weight*roi
+    value = value + regularization*prediction['penalty'].mean(-1)
+    if sample_weight is not None:
+        value = value * sample_weight.to(value)
+    return value.mean()
 
 
 def numpy_prediction(prediction, original_base_p, original_base_q):

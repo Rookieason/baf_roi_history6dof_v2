@@ -37,20 +37,27 @@ class HeatmapSeries:
             self.start = np.asarray(data['support_start_s'], float) + offset_s
             self.end = np.asarray(data['support_end_s'], float) + offset_s
             self.ready = np.asarray(data['available_at_s'], float) + offset_s
+            # Background subtraction may require packets after the center frame.
+            # Its completion time is not the age of that center measurement.
+            self.measurement = (np.asarray(data['measurement_s'], float) + offset_s
+                                if 'measurement_s' in data else self.end.copy())
+            self.measurement_time_source = 'measurement_s' if 'measurement_s' in data else 'support_end_s_legacy'
             self.theta, self.tau = np.asarray(data['theta_deg'], float), np.asarray(data['tau_s'], float)
             self.metadata = json.loads(str(data['metadata_json'].item()))
         n = len(self.maps)
         if not n or self.maps.shape != (n, len(self.theta), len(self.tau)):
             raise ValueError('maps must be nonempty [frames, angle, delay].')
-        if any(x.shape != (n,) for x in (self.valid, self.start, self.end, self.ready)):
+        if any(x.shape != (n,) for x in (self.valid, self.start, self.end, self.ready, self.measurement)):
             raise ValueError('One validity/support/availability value is required per map.')
         for axis in (self.theta, self.tau):
             if axis.ndim != 1 or len(axis) < 2 or not np.isfinite(axis).all() or np.any(np.diff(axis) <= 0):
                 raise ValueError('Physical axes must be finite and increasing.')
             if not np.allclose(np.diff(axis), np.diff(axis)[0], rtol=1e-4, atol=1e-15):
                 raise ValueError('CNN resizing assumes uniform axes; explicitly regrid irregular maps first.')
-        if not all(np.isfinite(x).all() for x in (self.start, self.end, self.ready)):
+        if not all(np.isfinite(x).all() for x in (self.start, self.end, self.ready, self.measurement)):
             raise ValueError('Map timing contains non-finite values.')
+        if np.any(self.measurement < self.start) or np.any(self.measurement > self.end):
+            raise ValueError('Map center measurement must lie inside its raw support.')
         if np.any(self.start > self.end) or np.any(self.ready < self.end) or np.any(np.diff(self.end) <= 0):
             raise ValueError('Invalid support, availability, or repeated/out-of-order measurement times.')
         if self.metadata.get('format_version') != 1 or self.metadata.get('representation') != 'aoa_tof':
@@ -92,10 +99,15 @@ def empty_window(cfg):
             'rf_available': False}
 
 
-def encode_window(series, origin_s, normalizer, cfg, delivery_delay_s=0.):
+def encode_window(series, origin_s, normalizer, cfg, delivery_delay_s=0., age_basis=None):
     """Channels: level, causal within-window background residual, signed temporal difference."""
     if series is None:
         return empty_window(cfg)
+    if age_basis not in (None, 'support_end', 'center_measurement'):
+        raise ValueError('Unknown RF age basis.')
+    if age_basis == 'center_measurement' and series.measurement_time_source != 'measurement_s':
+        raise ValueError('This checkpoint requires explicit center measurement timestamps.')
+    measurement = series.end if age_basis == 'support_end' else series.measurement
     queries, ids = series.indices(origin_s, cfg, delivery_delay_s)
     mask = ids >= 0
     result = empty_window(cfg)
@@ -117,7 +129,7 @@ def encode_window(series, origin_s, normalizer, cfg, delivery_delay_s=0.):
         if idx != previous_id:
             prior.append(level)
         previous_id, previous_level, previous_end = idx, level, series.end[idx]
-        result['timing'][j] = ((queries[j] - series.end[idx]) / cfg.max_age_s,
+        result['timing'][j] = ((queries[j] - measurement[idx]) / cfg.max_age_s,
                                (queries[j] - origin_s) / cfg.map_history_s)
     result['maps'] = F.interpolate(torch.from_numpy(features), (cfg.size, cfg.size),
                                    mode='bilinear', align_corners=True).numpy()
@@ -218,6 +230,13 @@ class ForecastDataset(Dataset):
         self.cfg = InputConfig(**self.manifest['input_config']).validate()
         self.rf = self.manifest['rf_manifest']
         self.rf_by_key = {r['key']: r for r in self.rf['records']}
+        age_bases = set()
+        for path in {r['file'] for r in self.rf['records'] if r.get('file')}:
+            with np.load(path, allow_pickle=False) as archive:
+                age_bases.add('measurement_s' in archive)
+        if len(age_bases) > 1:
+            raise ValueError('RF files mix center-frame and legacy completion-time age semantics; prepare a consistent experiment.')
+        self.rf_age_basis = 'center_measurement' if True in age_bases else 'support_end'
         scene = self.manifest['scene']
         self.scene = Scene(np.array(scene['centers_m']), scene['partition_ids'], scene['config'])
         if not np.isfinite(delivery_delay_s) or delivery_delay_s < 0:
@@ -266,7 +285,7 @@ class ForecastDataset(Dataset):
         history = raw['series'].history(int(a['anchors'][oi]))
         _, pose = model_inputs(history, self.cache.stats)
         window = encode_window(self.rf_series(r['key']), float(a['origin_s'][oi]),
-                               self.manifest['normalizer'], self.cfg, self.delivery_delay_s)
+                               self.manifest['normalizer'], self.cfg, self.delivery_delay_s, self.rf_age_basis)
         inputs = {'hmd': pose, **window, 'horizon_s': np.asarray(self.horizons, np.float32) / 1000,
                   'base_p': a['base_p'][oi].astype(np.float32), 'base_q': a['base_q'][oi].astype(np.float32),
                   'focused_p': a['focused_p'][oi].astype(np.float32), 'focused_q': a['focused_q'][oi].astype(np.float32),
@@ -274,4 +293,7 @@ class ForecastDataset(Dataset):
                   'alpha': np.float32(a['alpha'][oi])}
         supervision = {'target_p': a['target_p'][oi].astype(np.float32), 'target_q': a['target_q'][oi].astype(np.float32),
                        'target_mask': a['target_mask'][oi].astype(np.float32)}
-        return {'inputs': inputs, 'supervision': supervision, 'record_index': ri, 'origin_index': oi}
+        # Alpha rollout needs this same causal history. Carry it through collate
+        # instead of reopening the pose cache for every shuffled training item.
+        return {'inputs': inputs, 'supervision': supervision, 'history': history,
+                'record_index': ri, 'origin_index': oi}

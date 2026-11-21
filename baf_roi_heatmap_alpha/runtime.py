@@ -26,6 +26,8 @@ def load_alpha(path, dataset, device='cpu'):
 
 
 def batch_histories(dataset, batch, device='cpu'):
+    if 'history' in batch:
+        return batch['history'].to(device=device, dtype=torch.float64)
     histories = []
     for ri, oi in zip(batch['record_index'], batch['origin_index']):
         ri, oi = int(ri), int(oi)
@@ -89,7 +91,8 @@ the original BAF result, independent of any earlier RF correction.
                 raise ValueError('Unverified online RF cannot replace calibrated training RF.')
         ts = np.asarray(timestamps_s, float)
         result = self.base.predict_observations(ts, positions, rotations_deg, hs, stream_id)
-        window = encode_window(rf_series, float(ts[-1]), self.bundle['normalizer'], self.cfg, delivery_delay_s)
+        window = encode_window(rf_series, float(ts[-1]), self.bundle['normalizer'], self.cfg, delivery_delay_s,
+                               self.bundle.get('rf_age_basis', 'support_end'))
         result.update(rf_available=bool(window['rf_available']), adapted=False)
         if not window['rf_available']:
             return result

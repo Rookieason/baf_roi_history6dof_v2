@@ -50,7 +50,7 @@ def check_resources(path, initial=False):
             'peak_rss_mib': round(rss/1024**2, 2)}
 
 
-def dependency_times(matched, nic_receivers, half_window=12, past_only=False):
+def dependency_times(matched, nic_receivers, half_window=12, past_only=False, *, return_measurement=False):
     """Include future interpolation endpoints and every centered-background input.
 
     A merged value interpolated between two packets depends on BOTH endpoints,
@@ -79,7 +79,8 @@ def dependency_times(matched, nic_receivers, half_window=12, past_only=False):
         else:
             start, end = max(0, i-half_window), min(n, i+half_window+1)
         starts[i], ends[i] = np.min(lower[start:end]), np.max(upper[start:end])
-    return starts, ends, observed
+    result = (starts, ends, observed)
+    return result + (upper,) if return_measurement else result
 
 
 def selected_map_indices(starts, ends, observed, max_rate_hz=30.):
@@ -153,7 +154,7 @@ def profile(path):
     return cfg
 
 
-def inspect_session(dataset, session, settings):
+def inspect_session(dataset, session, settings, *, return_measurement=False):
     folder = dataset/'intermediates'/session
     expected = settings['generation']
     params_path = folder/'run_params.json'
@@ -181,7 +182,8 @@ def inspect_session(dataset, session, settings):
                 timestamp = float(row['recv_unix'])
                 receiver[name] = min(timestamp, receiver.get(name, timestamp))
         receivers[str(nic)] = receiver
-    starts, ends, observed = dependency_times(matched, receivers, expected['background_half_frames'], expected['past_only'])
+    starts, ends, observed, measurement = dependency_times(
+        matched, receivers, expected['background_half_frames'], expected['past_only'], return_measurement=True)
     selected = selected_map_indices(starts, ends, observed, settings['map_rate_hz'])
     if not len(selected):
         raise ValueError(f'{session}: no maps with bounded, observed input support.')
@@ -193,12 +195,14 @@ def inspect_session(dataset, session, settings):
             shape = np.lib.format.read_array(stream, allow_pickle=False).shape
     if list(shape) != expected['source_shape']:
         raise ValueError(f'{session}: expected AoA-ToF shape {expected["source_shape"]}, got {shape}')
-    return path, matched_path, starts, ends, selected, {
+    result = (path, matched_path, starts, ends, selected, {
         'session': session, 'parameters': params, 'parameter_source': parameter_source,
         'source_frames': len(matched), 'source_shape': list(shape),
         'observed_frames': int(observed.sum()), 'selected_maps': len(selected),
         'selected_support_span_p50_p99_s': np.percentile((ends-starts)[selected], [50,99]).tolist(),
-        'map_start_s': float(ends[selected[0]]), 'map_end_s': float(ends[selected[-1]])}
+        'map_start_s': float(ends[selected[0]]), 'map_end_s': float(ends[selected[-1]]),
+        'completion_minus_measurement_p50_p99_s': np.percentile((ends-measurement)[selected], [50,99]).tolist()})
+    return result + (measurement,) if return_measurement else result
 
 
 def session_settings(settings, session):
@@ -240,7 +244,8 @@ def prepare_recorded(config_path, output):
     for session in sorted(split_config):
         check_resources(out)
         selected_settings = session_settings(settings, session)
-        path, matched_path, starts, ends, selected, audit = inspect_session(dataset, session, selected_settings)
+        path, matched_path, starts, ends, selected, audit, measurement = inspect_session(
+            dataset, session, selected_settings, return_measurement=True)
         audit['generation_sample_check'] = verify_generation_sample(dataset, session, selected_settings)
         maps = np.empty((len(selected), input_cfg.size, input_cfg.size), np.float32)
         with zipfile.ZipFile(path) as archive:
@@ -260,11 +265,12 @@ def prepare_recorded(config_path, output):
                     'session': session, 'generation_parameters': selected_settings['generation'],
                     'historical_settings_evidence': audit['parameter_source'] + '; pinned generator and one recomputed numeric frame per session; no historical full generator snapshot exists',
                     'regridding': 'dB bilinear align_corners=True to training size; no heatmap regeneration',
-                    'map_rate_hz_max': settings['map_rate_hz'], 'reception_clock_only': True}
+                    'map_rate_hz_max': settings['map_rate_hz'], 'reception_clock_only': True,
+                    'measurement_time_source': 'maximum collector receive time of center-row interpolation inputs; not a hardware capture timestamp'}
         destination = maps_dir/(session+'.npz')
         np.savez_compressed(destination, maps=maps, valid=np.ones(len(maps), bool),
                             support_start_s=starts[selected], support_end_s=ends[selected],
-                            available_at_s=ends[selected], theta_deg=theta, tau_s=tau,
+                            available_at_s=ends[selected], measurement_s=measurement[selected], theta_deg=theta, tau_s=tau,
                             source_map_index=selected, metadata_json=json.dumps(metadata))
         HeatmapSeries(destination, allow_exploratory=True)
         files[session] = destination

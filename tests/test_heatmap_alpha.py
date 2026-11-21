@@ -14,8 +14,9 @@ from baf_roi_heatmap.data import HeatmapSeries, encode_window
 from baf_roi_heatmap.losses import numpy_prediction, task_loss
 from baf_roi.roi import Scene
 from baf_roi_heatmap_alpha.model import (AlphaConfig, AlphaFusion, HeatmapAlphaGate,
-    correct_alpha, heatmap_statistics, quaternion_to_ypr, ypr_to_quaternion)
+    correct_alpha, heatmap_statistics, quaternion_to_ypr, ypr_to_quaternion, frozen_rnn_input_grad)
 from baf_roi_heatmap_alpha.runtime import HeatmapAlphaPredictor
+from baf_roi_heatmap_alpha.runtime import batch_histories
 
 
 class ToyConfidence(nn.Module):
@@ -79,6 +80,32 @@ def test_zero_correction_is_bit_exact_baseline_including_saturated_alpha():
     a = torch.tensor([0., .2, .5, .8, 1.])
     torch.testing.assert_close(correct_alpha(a, torch.zeros_like(a)), a, rtol=0, atol=0)
     assert correct_alpha(a, torch.ones_like(a))[[0, -1]].tolist() == [0., 1.]
+
+
+def test_frozen_rnn_gradient_context_preserves_eval_behavior_and_restores_flags_on_error():
+    rnn = nn.LSTM(3, 4, num_layers=2, dropout=.4, batch_first=True)
+    module = nn.ModuleList([rnn, nn.Dropout(.5), nn.BatchNorm1d(4)]).eval()
+    for parameter in module.parameters(): parameter.requires_grad_(False)
+    x = torch.randn(2, 5, 3, requires_grad=True)
+    reference = rnn(x)[0]
+    with frozen_rnn_input_grad(module, True):
+        assert rnn.training and rnn.dropout == 0.
+        assert not module[1].training and not module[2].training
+        actual = rnn(x)[0]
+    torch.testing.assert_close(actual, reference)
+    actual.sum().backward()
+    assert torch.isfinite(x.grad).all()
+    with pytest.raises(RuntimeError):
+        with frozen_rnn_input_grad(module, True): raise RuntimeError('test cleanup')
+    assert not rnn.training and rnn.dropout == .4
+
+
+def test_collated_causal_history_is_reused_without_reopening_pose_cache():
+    _, histories, _, _ = fixture()
+    batch = {'history': torch.tensor(histories)}
+    result = batch_histories(None, batch)
+    np.testing.assert_array_equal(result.numpy(), histories)
+    assert result.dtype == torch.float64
 
 
 def test_nonzero_gate_matches_actual_per_step_numpy_rollout_and_changes_intermediates():

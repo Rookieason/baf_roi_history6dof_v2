@@ -67,6 +67,12 @@ def parser():
     p.add_argument('--smoke-epochs', type=int,
                    help='Explicit software-test override for ALL stages/models; outputs are marked as smoke tests.')
     p.add_argument('--lr', type=float, default=.001, help='Learning rate of the two heatmap adapters.')
+    p.add_argument('--heatmap-objective', choices=['roi_iou', 'pose_roi'], default='roi_iou',
+                   help='ROI IoU surrogate, or the legacy pose + weighted Tversky loss.')
+    p.add_argument('--heatmap-aggregation', choices=['recording', 'origin'], default='origin',
+                   help='Residual adapter: origin-uniform optimization, or optional recording-macro weighting.')
+    p.add_argument('--alpha-aggregation', choices=['recording', 'origin'], default='recording',
+                   help='Alpha-only gate: default recording-macro weighting.')
     p.add_argument('--heatmap-adapter', choices=['residual', 'expert_gate'], default='residual')
     p.add_argument('--modality', choices=['rf', 'hmd'], default='rf',
                    help='Existing baf_roi_heatmap adapter only; hmd is its capacity-matched ablation.')
@@ -299,11 +305,13 @@ def _train_selected(a, out, plan, cfg, device):
             from baf_roi_heatmap.train import train
             config = ModelConfig(method=a.heatmap_adapter, modality=a.modality, hidden=a.hidden)
             path = train(prepared, out / ('models/' + method), config, epochs=a.smoke_epochs or heat_epochs,
-                         batch_size=batch, lr=a.lr, seed=seed, device=device)
+                         batch_size=batch, lr=a.lr, seed=seed, device=device,
+                         objective=a.heatmap_objective, aggregation=a.heatmap_aggregation)
         elif method == 'baf_roi_heatmap_alpha':
             from baf_roi_heatmap_alpha.train import train
             path = train(prepared, out / ('models/' + method), epochs=a.smoke_epochs or alpha_epochs,
-                         batch_size=batch, lr=a.lr, seed=seed, device=device)
+                         batch_size=batch, lr=a.lr, seed=seed, device=device,
+                         objective=a.heatmap_objective, aggregation=a.alpha_aggregation)
         else:
             raise ValueError(f'Missing BAF checkpoint after dependency preparation: {method}')
         checkpoints[method], roles[method] = str(Path(path).resolve()), 'trained'
@@ -315,6 +323,8 @@ def _train_selected(a, out, plan, cfg, device):
             'checkpoint_roles': roles, 'seed': seed, 'batch_size': batch, 'device': device,
             'smoke_test': a.smoke_epochs is not None, 'smoke_epochs': a.smoke_epochs,
             'heatmap_adapter': a.heatmap_adapter, 'heatmap_modality': a.modality,
+            'heatmap_objective': a.heatmap_objective, 'heatmap_aggregation': a.heatmap_aggregation,
+            'alpha_aggregation': a.alpha_aggregation,
             'complete': False, 'plan': plan}
 
 
@@ -343,6 +353,9 @@ def write_summary(reports, output):
             horizon, margin = key.split('ms_margin')
             baseline = reference.get(key, {}).get('all', {}).get('pooled')
             row = {'method': name, 'horizon_ms': float(horizon), 'margin_deg': float(margin),
+                   'selected_epoch': (report.get('checkpoint_selection') or {}).get('selected_epoch'),
+                   'selection_status': (report.get('checkpoint_selection') or {}).get('status'),
+                   'correction_applied_fraction': report.get('correction_applied_fraction'),
                    **{field: pooled.get(field) for field in (
                        'n_origins', 'iou_mean', 'f1_micro', 'coverage_micro', 'precision_micro',
                        'selected_mean', 'required_mean', 'fp_mean', 'fn_mean', 'translation_mean_m', 'rotation_mean_deg')},

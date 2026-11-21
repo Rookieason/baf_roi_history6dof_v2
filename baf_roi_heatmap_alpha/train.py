@@ -10,6 +10,7 @@ from baf_roi_heatmap.contracts import file_hash, new_directory, seed_all, write_
 from baf_roi_heatmap.data import ForecastDataset
 from baf_roi_heatmap.evaluation import roi_counts
 from baf_roi_heatmap.losses import numpy_prediction, task_loss
+from baf_roi_heatmap.training_utils import CheckpointSelection, recording_weights
 from .model import AlphaConfig, AlphaFusion
 from .runtime import predict_dataset_batch
 
@@ -34,12 +35,15 @@ def validation_iou(model, dataset, loader, device):
 
 
 def train(prepared, output, config=None, epochs=20, batch_size=64, lr=1e-3,
-          seed=42, device='cpu', roi_weight=.25):
+          seed=42, device='cpu', roi_weight=.25, *, objective='roi_iou', aggregation='recording'):
     config = (config or AlphaConfig()).validate()
     if epochs < 1 or batch_size < 1 or not math.isfinite(lr) or lr <= 0 or not math.isfinite(roi_weight) or roi_weight < 0:
         raise ValueError('Invalid training hyperparameters.')
     seed_all(seed)
     training, validation = ForecastDataset(prepared, 'train'), ForecastDataset(prepared, 'valid')
+    weights = recording_weights(training, aggregation)
+    if objective not in ('pose_roi', 'roi_iou'):
+        raise ValueError('Unknown training objective.')
     if not training.manifest['normalizer']['sample_count']:
         raise ValueError('There are no valid training RF maps.')
     if not any(bool(training[i]['inputs']['rf_available']) for i in range(len(training))):
@@ -54,7 +58,8 @@ def train(prepared, output, config=None, epochs=20, batch_size=64, lr=1e-3,
                               generator=torch.Generator().manual_seed(seed))
     valid_loader = DataLoader(validation, batch_size=batch_size, shuffle=False)
     out = new_directory(output)
-    best, log = -float('inf'), []
+    log = []
+    selection = CheckpointSelection(out, 'alpha.pt')
     for epoch in range(epochs+1):
         loss_value = None
         if epoch:
@@ -64,7 +69,8 @@ def train(prepared, output, config=None, epochs=20, batch_size=64, lr=1e-3,
                 optimizer.zero_grad(set_to_none=True)
                 prediction = predict_dataset_batch(model, training, batch, device)
                 labels = {key: value.to(device) for key, value in batch['supervision'].items()}
-                loss = task_loss(prediction, labels, training.scene, roi_weight=roi_weight)
+                loss = task_loss(prediction, labels, training.scene, roi_weight=roi_weight,
+                                 objective=objective, sample_weight=weights[batch['record_index']])
                 if not torch.isfinite(loss):
                     raise FloatingPointError('Non-finite alpha training loss.')
                 loss.backward()
@@ -76,9 +82,7 @@ def train(prepared, output, config=None, epochs=20, batch_size=64, lr=1e-3,
         score = validation_iou(model, validation, valid_loader, device)
         log.append({'epoch': epoch, 'train_loss': loss_value, 'validation_recording_macro_iou': score})
         print(f'Alpha-only epoch={epoch}/{epochs} train_loss={loss_value} validation_IoU={score:.6f}', flush=True)
-        if score > best+1e-12:
-            best = score
-            bundle = {'format_version': 1, 'method': 'baf_roi_heatmap_alpha',
+        bundle = {'format_version': 1, 'method': 'baf_roi_heatmap_alpha',
                       'gate': model.gate.state_dict(), 'model_config': asdict(config),
                       'experiment_id': training.manifest['experiment_id'],
                       'baseline_sha256': training.manifest['baseline_sha256'],
@@ -86,9 +90,13 @@ def train(prepared, output, config=None, epochs=20, batch_size=64, lr=1e-3,
                       'grid_id': training.rf['grid_id'], 'allow_exploratory': training.rf.get('allow_exploratory', False),
                       'normalizer': training.manifest['normalizer'], 'selected_epoch': epoch,
                       'validation_recording_macro_iou': score, 'seed': seed, 'roi_weight': roi_weight,
+                      'objective': objective, 'aggregation': aggregation,
+                      'rf_age_basis': training.rf_age_basis,
                       'selection': 'validation recording-macro IoU, equally weighted trained horizons; epoch zero eligible'}
-            torch.save(bundle, out/'alpha.pt')
+        status = selection.update(bundle)
         write_json(out/'training.json', {'specification': model.specification(), 'history': log,
                                         'epochs': epochs, 'batch_size': batch_size, 'learning_rate': lr, 'seed': seed,
+                                        'objective': objective, 'aggregation': aggregation, **status,
                                         'warning': 'Software execution is not evidence of real-data CSI improvement.'})
+    print(f'Alpha-only selection: {status}', flush=True)
     return str(out/'alpha.pt')

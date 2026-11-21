@@ -21,6 +21,8 @@ def parser():
     p.add_argument('--epochs', type=int, default=20); p.add_argument('--batch-size', type=int, default=64)
     p.add_argument('--lr', type=float, default=.001); p.add_argument('--seed', type=int, default=42); p.add_argument('--device', default='cpu')
     p.add_argument('--roi-weight', type=float, default=.25)
+    p.add_argument('--objective', choices=['roi_iou', 'pose_roi'], default='roi_iou')
+    p.add_argument('--aggregation', choices=['recording', 'origin'], default='origin')
     p.add_argument('--hidden', type=int, default=32); p.add_argument('--max-translation-m', type=float, default=.2)
     p.add_argument('--max-rotation-deg', type=float, default=20.); p.add_argument('--max-logit-delta', type=float, default=2.)
     p = commands.add_parser('evaluate'); p.add_argument('--prepared', required=True); p.add_argument('--output', required=True)
@@ -59,7 +61,8 @@ def main(argv=None):
     elif a.command == 'train':
         from .train import train
         result = {'checkpoint': train(a.prepared, a.output, ModelConfig(a.method, a.modality, a.ablation, a.hidden, a.max_translation_m, a.max_rotation_deg, a.max_logit_delta),
-                                     a.epochs, a.batch_size, a.lr, a.seed, a.device, a.roi_weight)}
+                                     a.epochs, a.batch_size, a.lr, a.seed, a.device, a.roi_weight,
+                                     objective=a.objective, aggregation=a.aggregation)}
     elif a.command == 'evaluate':
         from .evaluation import evaluate
         result = evaluate(a.prepared, a.output, a.checkpoint, a.baseline or 'baf', a.split, a.device,
