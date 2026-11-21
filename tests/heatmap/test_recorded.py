@@ -105,13 +105,13 @@ def test_phantom_rows_are_not_selected_as_measurements():
 
 def test_fixed_split_is_complete_disjoint_and_stratified():
     split = json.loads((ROOT/'configs/splits_20261031.json').read_text())
-    assert [len(split[s]) for s in ('train','valid','test')] == [12,3,3]
+    assert [len(split[s]) for s in ('train','valid','test')] == [11,3,3]
     flat = sum(split.values(),[])
-    added = '20260330-082303_record-5-minutes'
-    assert len(flat)==len(set(flat))==18 and added in split['train']
+    assert len(flat)==len(set(flat))==17
+    assert all(s.startswith('20261031') for s in flat)
     assert '20261031-084133_upperbody_part' not in flat
     for sessions in split.values():
-        assert {s.split('_',1)[1] for s in sessions if s != added}=={'upperbody_part','lowerbody_part','longlong'}
+        assert {s.split('_',1)[1] for s in sessions}=={'upperbody_part','lowerbody_part','longlong'}
 
 
 def test_additional_session_uses_its_topic_and_is_required(tmp_path):
@@ -143,8 +143,11 @@ def test_flat_hmd_uses_collector_clock_and_cm(tmp_path):
 
 def test_generation_override_preserves_other_sessions():
     cfg = json.loads((ROOT/'configs/recorded_20261031.json').read_text())
-    settings = cfg['recorded_heatmaps']
-    old = session_settings(settings, '20260330-082303_record-5-minutes')
+    settings = {**cfg['recorded_heatmaps'], 'session_overrides': {
+        'historical_fixture': {'allow_missing_run_params': True,
+                               'generation': {'subcarriers': 2025, 'center_mhz': 5570}}
+    }}
+    old = session_settings(settings, 'historical_fixture')
     base = session_settings(settings, '20261031_fixture')
     assert old['generation']['subcarriers'] == 2025
     assert old['generation']['center_mhz'] == 5570

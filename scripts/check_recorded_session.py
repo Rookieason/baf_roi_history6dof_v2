@@ -12,7 +12,7 @@ from baf_roi_heatmap.recorded import profile, session_settings, inspect_session,
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', default='configs/recorded_20261031.json')
-    parser.add_argument('--session', default='20260330-082303_record-5-minutes')
+    parser.add_argument('--session', default='20261031-084248_upperbody_part')
     args = parser.parse_args()
     cfg = profile(args.config)
     recordings = discover_recordings(cfg['data']['dataset_root'], cfg['data'])
