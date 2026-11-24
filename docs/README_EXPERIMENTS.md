@@ -10,12 +10,16 @@
 |---|---|---|---|
 | `baf_roi` | `baf_roi/` | 原始 HMD history → Confidence、Focused、Explorer → 逐步融合姿態 → ROI | 本身訓練或載入 BAF |
 | `motion_transformer_roi` | `motion_transformer_roi/` | 相同 HMD history → Motion Transformer → 未來姿態 → ROI | 不需要 |
-| `baf_roi_heatmap` | `baf_roi_heatmap/` | 凍結 BAF，加上 HMD／heatmap adapter；預設為 `residual` 姿態修正 | 需要，共用相同的凍結 BAF |
+| `baf_roi_heatmap` | `baf_roi_heatmap/` | 預設 `motion_moe`：CSI-conditioned experts 與逐步 routing；二／三／四分支 | 需要，用於初始化、原始 confidence、fallback 與比較 |
 | `baf_roi_heatmap_alpha` | `baf_roi_heatmap_alpha/` | Heatmap 只修正 BAF rollout 每一步的 α，維持原本兩個姿態專家 | 需要，共用相同的凍結 BAF |
 
 `roi_experiments/` 放共同的 method registry、工作流程、評估、彙整與繪圖。各方法的模型與訓練演算法仍由上表對應的套件負責。Heatmap 方法可以重用 `baf_roi/` 的凍結專家，以及既有 heatmap 資料載入器。
 
 `baf_roi_heatmap` 原有的 `expert_gate` 是對已經預測好的 horizon 終點做融合；新增 `baf_roi_heatmap_alpha` 則在 BAF 自回歸預測過程中修改 α。這兩個名稱代表不同方法，不能把結果混成同一組。
+
+目前 `baf_roi_heatmap` 預設已改為內部 `motion_moe`，不是上述兩種舊 adapter。它讓 CSI 參與 expert latent features 與 router，每一步 fusion 都改變後續 history。預設三分支、`pose_roi` loss、recording-balanced optimization；每個 horizon 的 validation pose error 與 coverage 均須符合相對 BAF 的退步上限，epoch 0 原 BAF 也可被選中。完整設計與 ablation 指令見 [Motion fusion](README_MOTION_FUSION.md)。
+
+主要參數：`--motion-experts 2|3|4`、`--motion-conditioning joint|router_only`、`--modality rf|hmd`。`router_only` 控制組須搭配 `--motion-experts 2`。`--heatmap-adapter residual|expert_gate` 可重現舊架構，預設仍採舊 `roi_iou`／origin optimization；`--heatmap-objective` 與 `--heatmap-aggregation` 可明確覆寫。alpha-only 的原預設不變。
 
 ## 2. 最直接的執行方式
 
@@ -125,7 +129,7 @@ Prepared 已固定 RF input config、scene 與 horizons，因此不能用新的 
 |---|---|
 | `--baseline-checkpoint` | BAF Confidence、Focused、Explorer |
 | `--motion-transformer-checkpoint` | Motion Transformer |
-| `--heatmap-checkpoint` | 原有 residual／expert_gate adapter |
+| `--heatmap-checkpoint` | motion_moe 或舊 residual／expert_gate；按 checkpoint 儲存的 config 載入 |
 | `--alpha-checkpoint` | 新增的 alpha-only adapter |
 
 例如，所有模型都已訓練好，希望由共同入口建立一份結果：
@@ -167,11 +171,13 @@ python scripts/run_experiments.py evaluate \
 | `--threads 2` | PyTorch CPU intra-op threads |
 | `--horizons-ms 50 250 1000` | 新實驗共同使用這些 horizons；支援 50–1000 ms，不能重複 |
 | `--mt-epochs 30` | MT 訓練上限；保留其既有 validation early stopping |
-| `--heatmap-epochs 20` | 原有 heatmap adapter epochs；未指定時採 recorded profile 設定，否則 20 |
+| `--heatmap-epochs 20` | CSI motion model／舊 adapter epochs；未指定時採 recorded profile 設定，否則 20 |
 | `--alpha-epochs 20` | Alpha adapter epochs；未指定時與 heatmap epochs 相同 |
-| `--lr 0.001` | 兩種 heatmap adapter 的 learning rate |
-| `--heatmap-adapter residual` | `baf_roi_heatmap` 使用 residual；可改成 `expert_gate` |
-| `--modality hmd` | 原有 heatmap adapter 的 HMD-only 容量對照；不會把 alpha method 改成其他模型 |
+| `--lr 0.001` | Heatmap 新模組的 learning rate；motion model 的預訓練 pose heads 使用 0.1 倍 |
+| `--heatmap-adapter motion_moe` | 預設內部 motion experts；可明確選舊 `residual`／`expert_gate` |
+| `--motion-experts 3` | 預設三個 experts，可比較 2／4 |
+| `--motion-conditioning router_only --motion-experts 2` | 原 experts 全凍結，只學 routing 的控制組 |
+| `--modality hmd` | baf_roi_heatmap 的同結構 HMD-only 控制；不改變 alpha method |
 | `--margins 0 5 10 20` | 共同的預測 FoV margin sweep，預設就是這四個值 |
 | `--delivery-delay-ms 100` | 在 prepared RF 資料上增加接收延遲，以相同 origin 集合檢查缺測 fallback |
 

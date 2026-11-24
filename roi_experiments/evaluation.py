@@ -11,7 +11,7 @@ from baf_roi.pose import quaternion_error_deg
 from baf_roi.roi import Scene
 from baf_roi_heatmap.contracts import ModelConfig, digest, file_hash, new_directory, read_json, write_json
 from baf_roi_heatmap.data import ForecastDataset
-from baf_roi_heatmap.model import ForecastAdapter
+from baf_roi_heatmap.model import build_forecaster, forward_batch
 from baf_roi_heatmap.losses import numpy_prediction
 
 
@@ -23,7 +23,12 @@ def load_adapter(path, dataset, device='cpu'):
     bundle = torch.load(path, map_location='cpu', weights_only=True)
     if bundle.get('format_version') != 1 or bundle.get('experiment_id') != dataset.manifest['experiment_id']:
         raise ValueError('Adapter checkpoint/prepared experiment mismatch.')
-    model = ForecastAdapter(ModelConfig(**bundle['model_config'])).to(device)
+    config = ModelConfig(**bundle['model_config']).validate()
+    baseline = dataset.manifest.get('baseline_checkpoint')
+    if config.method == 'motion_moe' and (bundle.get('baseline_sha256') != dataset.manifest['baseline_sha256']
+                                           or file_hash(baseline) != bundle['baseline_sha256']):
+        raise ValueError('Internal motion experts require the unchanged prepared BAF checkpoint.')
+    model = build_forecaster(config, baseline, device)
     model.load_state_dict(bundle['model'], strict=True)
     model.eval()
     return model, bundle
@@ -159,6 +164,7 @@ def evaluate(prepared, output, checkpoint=None, baseline='baf', split='test', de
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
     for batch in loader:
         ris, ois = batch['record_index'].numpy(), batch['origin_index'].numpy()
+        expert_weights, rf_reliability = None, None
         applied = np.zeros((len(ris), len(dataset.horizons)), dtype=bool)
         if transformer is not None or _pose_predictor is not None:
             histories = []
@@ -180,7 +186,10 @@ def evaluate(prepared, output, checkpoint=None, baseline='baf', split='test', de
                 from baf_roi_heatmap_alpha.runtime import predict_dataset_batch
                 prediction = predict_dataset_batch(alpha_model, dataset, batch, device)
             else:
-                prediction = model(to_device(batch['inputs'], device))
+                prediction = forward_batch(model, batch, device)
+                if model.config.method == 'motion_moe':
+                    expert_weights = prediction['expert_weights'].cpu().numpy()
+                    rf_reliability = prediction['rf_reliability'].cpu().numpy()
             p, q = numpy_prediction(prediction, original_p, original_q)
             gates = prediction['gate'].cpu().numpy()
             applied = prediction['applied'].cpu().numpy().astype(bool)
@@ -227,6 +236,7 @@ def evaluate(prepared, output, checkpoint=None, baseline='baf', split='test', de
                                  'rf_available': int(batch['inputs']['rf_available'][b]), 'gate': float(gates[b, j]) if gates is not None else None,
                                  'correction_applied': int(applied[b, j]),
                                  'gate_kind': ('none' if gates is None else
+                                               'motion_explorer_family_mass' if expert_weights is not None and applied[b, j] else
                                                'rollout_upper_step' if alpha_model is not None and applied[b, j] else
                                                'terminal_expert_mix' if model is not None and bundle['model_config']['method'] == 'expert_gate' and applied[b, j] else
                                                'fixed_rollout_weight' if model is None and alpha_model is None and _pose_predictor is None and baseline in ('focused', 'explorer', 'fixed') else
@@ -234,6 +244,9 @@ def evaluate(prepared, output, checkpoint=None, baseline='baf', split='test', de
                                  'tp': int(tp[b, j]), 'fp': int(fp[b, j]), 'fn': int(fn[b, j]), 'tn': int(tn[b, j]),
                                  'iou': float(iou[b, j]), 'translation_error_m': float(tr[b, j]),
                                  'rotation_error_deg': float(rot[b, j]), 'transition_error': transition})
+                    if expert_weights is not None:
+                        rows[-1].update({f'expert_weight_{k}': float(w) for k, w in enumerate(expert_weights[b, j])})
+                        rows[-1]['rf_reliability'] = float(rf_reliability[b, j])
     with (out/'per_origin.csv').open('w', newline='', encoding='utf-8') as stream:
         writer = csv.DictWriter(stream, fieldnames=list(rows[0])); writer.writeheader(); writer.writerows(rows)
     groups = defaultdict(list)
@@ -270,6 +283,27 @@ def evaluate(prepared, output, checkpoint=None, baseline='baf', split='test', de
         'aggregation': bundle.get('aggregation', 'origin'),
     } if bundle else None)
     report['correction_applied_fraction'] = float(np.mean([r['correction_applied'] for r in rows]))
+    if model is not None and model.config.method == 'motion_moe':
+        report['motion_experts'] = model.specification()
+        report['gate_diagnostic'] = ('Applied gate is total Explorer-family mass, not a calibrated behavior probability. '
+                                    'expert_weight_k contains each upper-step weight. rf_reliability is learned feature attenuation, '
+                                    'not a calibrated correctness score. Fallback gate remains observed BAF alpha.')
+        report['checkpoint_selection'].update(validation_limits=bundle.get('validation_limits'),
+                                               selection_eligible=bundle.get('selection_eligible'),
+                                               validation_regression_reasons=bundle.get('validation_regression_reasons'))
+        if bundle.get('selection_eligible') is False:
+            report['checkpoint_selection']['status'] = 'validation_ineligible_epoch'
+        # Use each origin/horizon once, not repeated margin-sweep rows.
+        unique = list({(r['origin_id'], r['horizon_ms']): r for r in rows}.values())
+        report['expert_usage_by_horizon'] = {}
+        for h in dataset.horizons:
+            values = [r for r in unique if r['horizon_ms'] == h and r['correction_applied']]
+            report['expert_usage_by_horizon'][str(h)] = ({
+                'n': len(values), 'mean_weights': [float(np.mean([r[f'expert_weight_{k}'] for r in values]))
+                                                  for k in range(model.config.experts)],
+                'winner_fraction': [float(np.mean([np.argmax([r[f'expert_weight_{j}'] for j in range(model.config.experts)]) == k
+                                                   for r in values])) for k in range(model.config.experts)]}
+                if values else None)
     write_json(out/'report.json', report)
     return report
 

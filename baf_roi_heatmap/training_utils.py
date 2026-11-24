@@ -35,7 +35,7 @@ class CheckpointSelection:
             if score > self.best_trained + 1e-12:
                 self.best_trained, self.best_trained_epoch = score, epoch
                 torch.save(bundle, self.output/'best_trained.pt')
-        if score > self.best + 1e-12:
+        if bundle.get('selection_eligible', True) and score > self.best + 1e-12:
             self.best, self.selected_epoch = score, epoch
             torch.save(bundle, self.output/self.filename)
         return {'selected_epoch': self.selected_epoch,

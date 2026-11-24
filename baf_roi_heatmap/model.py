@@ -68,10 +68,31 @@ def ablate_maps(maps, mask, mode):
     return maps, mask
 
 
+def build_forecaster(config, baseline_checkpoint=None, device='cpu'):
+    """Checkpoint config explicitly selects internal rollout or a legacy adapter."""
+    config.validate()
+    if config.method == 'motion_moe':
+        from baf_roi.runtime import Predictor
+        from .motion import MotionFusion
+        if baseline_checkpoint is None:
+            raise ValueError('Internal motion experts require the matching BAF checkpoint.')
+        return MotionFusion(Predictor.load(baseline_checkpoint, device), config).to(device)
+    return ForecastAdapter(config).to(device)
+
+
+def forward_batch(model, batch, device):
+    inputs = {key: value.to(device) for key, value in batch['inputs'].items()}
+    if model.config.method == 'motion_moe':
+        return model(inputs, batch['history'].to(device=device, dtype=torch.float64))
+    return model(inputs)
+
+
 class ForecastAdapter(nn.Module):
     def __init__(self, config=None):
         super().__init__()
         self.config = (config or ModelConfig()).validate()
+        if self.config.method == 'motion_moe':
+            raise ValueError('motion_moe uses MotionFusion with a BAF checkpoint, not ForecastAdapter.')
         h = self.config.hidden
         self.hmd = nn.GRU(7, h, batch_first=True)
         self.spatial = nn.Sequential(nn.Conv2d(3, 8, 3, stride=2, padding=1), nn.GELU(),

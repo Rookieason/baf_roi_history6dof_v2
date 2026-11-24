@@ -16,6 +16,13 @@ from .prepare import fixed_forecast
 class HeatmapPredictor:
     def __init__(self, baseline_checkpoint, adapter_checkpoint, device='cpu'):
         self.bundle = torch.load(adapter_checkpoint, map_location='cpu', weights_only=True)
+        self._motion = None
+        if self.bundle.get('model_config', {}).get('method') == 'motion_moe':
+            from .motion_runtime import MotionPredictor
+            self._motion = MotionPredictor(baseline_checkpoint, adapter_checkpoint, device)
+            self.base, self.model, self.cfg = self._motion.base, self._motion.model, self._motion.cfg
+            self.device = device
+            return
         if self.bundle.get('format_version') != 1 or file_hash(baseline_checkpoint) != self.bundle['baseline_sha256']:
             raise ValueError('Adapter and baseline checkpoint identity mismatch.')
         self.base = Predictor.load(baseline_checkpoint, device)
@@ -30,6 +37,9 @@ class HeatmapPredictor:
     @torch.inference_mode()
     def predict_observations(self, timestamps_s, positions, rotations_deg, rf_series=None,
                              horizons_ms=None, stream_id=None, delivery_delay_s=0.):
+        if getattr(self, '_motion', None) is not None:
+            return self._motion.predict_observations(timestamps_s, positions, rotations_deg, rf_series,
+                                                      horizons_ms, stream_id, delivery_delay_s)
         state = self.base.observed_state.copy()
         try:
             return self._predict(timestamps_s, positions, rotations_deg, rf_series, horizons_ms, stream_id, delivery_delay_s)
@@ -106,8 +116,12 @@ def benchmark(prepared, adapter_checkpoint, output_path, device='cpu', count=50)
     values = [sample(i, dataset.records[int(dataset.index[i, 0])]['key']) for i in range(min(count, len(dataset)))]
     report = {'count': len(values), 'device': str(device), 'torch': str(torch.__version__), 'threads': torch.get_num_threads(),
               'parameters_adapter': sum(p.numel() for p in predictor.model.parameters()),
+              'parameters_trainable': sum(p.numel() for p in predictor.model.parameters() if p.requires_grad),
+              'architecture': predictor.model.config.method,
               'median_ms': float(np.median(values)), 'p95_ms': float(np.quantile(values, .95)),
-              'scope': 'batch one: HMD resampling, BAF rollout, optional expert rollouts, RF lookup/encoding, adapter, hard ROI; warmup excluded',
+              'scope': ('batch one: HMD resampling, observed confidence, RF lookup/encoding, internal expert rollout, hard ROI; warmup excluded'
+                        if predictor.model.config.method == 'motion_moe' else
+                        'batch one: HMD resampling, BAF rollout, optional expert rollouts, RF lookup/encoding, adapter, hard ROI; warmup excluded'),
               'excludes': 'RF acquisition, clock sync, MUSIC generation, disk I/O, network, renderer; not a full-system FPS guarantee'}
     write_json(output_path, report)
     return report

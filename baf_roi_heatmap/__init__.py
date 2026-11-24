@@ -1,2 +1,2 @@
-"""Causal CSI heatmap extensions for the frozen BAF-ROI baseline."""
-__version__ = '0.1.0'
+"""Causal CSI-conditioned BAF motion experts, with legacy adapter controls."""
+__version__ = '0.2.0'

@@ -4,6 +4,8 @@
 
 四個正式 methods 為 `baf_roi`、`motion_transformer_roi`、`baf_roi_heatmap`、`baf_roi_heatmap_alpha`，由 `scripts/run_experiments.py --method ...` 指定，不指定就全部執行。模型實作分別留在四個套件；共同 metric engine 在 `roi_experiments/evaluation.py`。原 `baf_roi_heatmap.evaluation` 只保留相容入口。
 
+當前 `baf_roi_heatmap` 預設為 `motion_moe`：CSI 進入逐步 motion experts 與 router。新的逐 horizon validation pose／coverage 限制、二／三／四分支控制與 expert usage diagnostics 見 [Motion fusion](README_MOTION_FUSION.md)。本文件原 residual／expert_gate 說明仍適用於歷史控制組，既有 1122 數字不是新模型的結果。
+
 此版核對了 `CSI_ROI_Objective_Accuracy_Quality.pptx` 與 `20261016.pptx`：主表採逐 origin 的 **Mean IoU**、累計 TP/FP/FN 的 **Micro F1**。研究目標是
 
 $$

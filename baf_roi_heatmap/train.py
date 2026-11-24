@@ -1,4 +1,4 @@
-"""Train only the small adapter; select checkpoints by validation recording-macro ROI IoU."""
+"""Train internal motion experts by default, or explicitly selected legacy adapters."""
 from collections import defaultdict
 from dataclasses import asdict
 import math
@@ -8,8 +8,8 @@ import torch
 from torch.utils.data import DataLoader
 from .contracts import ModelConfig, new_directory, seed_all, write_json
 from .data import ForecastDataset
-from .model import ForecastAdapter
-from .losses import task_loss, numpy_prediction
+from .model import ForecastAdapter, forward_batch
+from .losses import task_loss, numpy_prediction, motion_task_loss
 from .evaluation import to_device, roi_counts
 from .training_utils import CheckpointSelection, recording_weights
 
@@ -21,14 +21,19 @@ def train_epoch(model, loader, optimizer, scene, device, roi_weight,
     for batch in loader:
         inputs, labels = to_device(batch['inputs'], device), to_device(batch['supervision'], device)
         optimizer.zero_grad(set_to_none=True)
-        prediction = model(inputs)
+        prediction = forward_batch(model, batch, device)
         sample_weight = weights[batch['record_index']] if weights is not None else None
-        loss = task_loss(prediction, labels, scene, roi_weight=roi_weight,
-                         objective=objective, sample_weight=sample_weight)
+        loss_function = motion_task_loss if model.config.method == 'motion_moe' else task_loss
+        loss = loss_function(prediction, labels, scene, roi_weight=roi_weight,
+                             objective=objective, sample_weight=sample_weight, **(
+                                 {'inputs': inputs} if model.config.method == 'motion_moe' else {}))
         if not torch.isfinite(loss): raise FloatingPointError('Non-finite adapter loss.')
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 5., error_if_nonfinite=True)
-        optimizer.step()
+        # Internal fusion may receive a whole batch of unavailable RF. Its
+        # exact BAF fallback has no trainable path and must not trigger backward.
+        if loss.requires_grad:
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 5., error_if_nonfinite=True)
+            optimizer.step()
         total += float(loss.detach()) * len(inputs['hmd']); count += len(inputs['hmd'])
     return total / count
 
@@ -53,8 +58,14 @@ def validation_iou(model, dataset, loader, device):
 
 
 def train(prepared, output, config=None, epochs=20, batch_size=64, lr=1e-3, seed=42, device='cpu', roi_weight=.25,
-          *, objective='roi_iou', aggregation='origin'):
-    config = (config or ModelConfig()).validate()
+          *, objective=None, aggregation=None, validation_limits=None):
+    config = (config or ModelConfig(method='motion_moe')).validate()
+    objective = objective or ('pose_roi' if config.method == 'motion_moe' else 'roi_iou')
+    aggregation = aggregation or ('recording' if config.method == 'motion_moe' else 'origin')
+    if config.method == 'motion_moe':
+        from .motion_training import train_motion
+        return train_motion(prepared, output, config, epochs, batch_size, lr, seed, device, roi_weight,
+                            objective, aggregation, validation_limits)
     if epochs < 1 or batch_size < 1 or not math.isfinite(lr) or lr <= 0 or not math.isfinite(roi_weight) or roi_weight < 0:
         raise ValueError('Invalid training hyperparameters.')
     seed_all(seed)

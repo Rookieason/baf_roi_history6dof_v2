@@ -68,3 +68,29 @@ def numpy_prediction(prediction, original_base_p, original_base_q):
     q = prediction['q'].detach().cpu().numpy().astype(np.float64)
     applied = prediction['applied'].detach().cpu().numpy()
     return np.where(applied[..., None], p, original_base_p), np.where(applied[..., None], q, original_base_q)
+
+
+def motion_task_loss(prediction, supervision, scene, roi_weight=.25, regularization=.001,
+                     *, objective='pose_roi', sample_weight=None, inputs):
+    """Pose + ROI with a label-only penalty for regression against frozen BAF.
+
+    CSI may contain unrelated body motion. Penalize excess pose error and missed
+    visibility instead of rewarding every large RF response. This is a training
+    preference, not a per-example or test-set non-regression guarantee.
+    """
+    value = task_loss(prediction, supervision, scene, roi_weight, regularization,
+                      objective=objective, sample_weight=sample_weight)
+    target_p, target_q = supervision['target_p'], unit_quaternion(supervision['target_q'])
+    pose_excess = (torch.linalg.vector_norm(prediction['p']-target_p, dim=-1)
+                   - torch.linalg.vector_norm(inputs['base_p']-target_p, dim=-1)).clamp_min(0)/.1
+    rotation_error = lambda q: 4*(1-(unit_quaternion(q)*target_q).sum(-1).square().clamp(0, 1))/math.radians(10)**2
+    rotation_excess = (rotation_error(prediction['q'])-rotation_error(inputs['base_q'])).clamp_min(0)
+    probability = soft_visibility(prediction['p'], prediction['q'], scene)
+    with torch.no_grad():
+        baseline = soft_visibility(inputs['base_p'], inputs['base_q'], scene)
+    truth = supervision['target_mask']
+    missed_excess = ((baseline-probability)*truth).sum(-1).clamp_min(0)/truth.sum(-1).clamp_min(1)
+    regret = (pose_excess+rotation_excess+missed_excess).mean(-1)
+    if sample_weight is not None:
+        regret = regret*sample_weight.to(regret)
+    return value+.1*regret.mean()

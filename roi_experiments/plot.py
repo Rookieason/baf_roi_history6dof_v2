@@ -23,6 +23,8 @@ def method_label(method):
     name = method.get('method', 'adapter')
     if name == 'baf_roi_heatmap_alpha':
         return 'BAF + heatmap alpha'
+    if name == 'motion_moe':
+        return f'BAF + CSI motion experts (K={method["experts"]}, {method["modality"]}, {method["conditioning"]})'
     return ' / '.join(str(method[k]) for k in ('method', 'modality', 'ablation') if k in method)
 
 

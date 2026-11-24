@@ -1,6 +1,6 @@
 # CSI-assisted ROI Selection：四種方法、共同實驗入口
 
-研究問題：在相同 HMD history、資料切分、future horizons 與 ROI 幾何下，當下已可取得的 CSI heatmap，能否提供超出 HMD history 的資訊，讓未來 partition selection 更準確？
+研究問題：BAF 的 Focused／Explorer 使用 HMD 6DoF 描述 motion，但相似的頭部歷史可能隱藏不同的身體動態。當下可取得的 CSI 能否補充這些資訊，改善 expert 本身的預測與行為分工？二分支是否足夠，或需要更多 motion experts？比較共用 HMD history、split、horizons 與 ROI 幾何。
 
 本分支為 `feature/csi-heatmap-fusion`。原 baseline 文件保存在 [README_BASELINE.md](README_BASELINE.md)。BAF 與 Motion Transformer 的模型仍在各自套件；此次統一了實驗入口與評估，並修正 BAF 不規則 decision gaps 的 observed α reset。原作者 `vendor/` 與 extracted model/fusion operators 不變。
 
@@ -10,10 +10,12 @@
 |---|---|---|
 | `baf_roi` | `baf_roi/` | 原 BAF-Pose：Confidence + Focused + Explorer |
 | `motion_transformer_roi` | `motion_transformer_roi/` | HMD history → Motion Transformer → future pose |
-| `baf_roi_heatmap` | `baf_roi_heatmap/` | 預設 residual：HMD／heatmap encoder 修正凍結 BAF 的 future pose；保留 `expert_gate` 比較組 |
+| `baf_roi_heatmap` | `baf_roi_heatmap/` | 預設 `motion_moe`：CSI 進入 expert 隱藏特徵與逐步 router；預設三分支，可比較二／四分支；保留舊 residual／expert_gate 控制組 |
 | `baf_roi_heatmap_alpha` | `baf_roi_heatmap_alpha/` | 8 個 heatmap 統計量 → 161 參數小 gate；只修正 BAF 每個 autoregressive step 的 α |
 
-`roi_experiments/` 負責 method registry、執行順序、共同 evaluator、摘要及圖表，不放第五種模型。兩個 heatmap 方法共用原 BAF experts、因果 RF 資料介面及 ROI 幾何。新的 alpha 方法不是原 `expert_gate` 的改名：它確實改變每一步 fusion 和之後的預測 history。
+`roi_experiments/` 負責 method registry、執行順序、共同 evaluator、摘要及圖表，不放第五種模型。兩個 heatmap 方法共用原 BAF checkpoint、因果 RF 資料介面與 ROI 幾何。`motion_moe` 複製原 experts 初始化，凍結原 temporal encoders，訓練 CSI latent conditioning、native pose heads 與 router；原 BAF 基準不變。alpha-only 則仍凍結全部原 experts。
+
+**目前預設不再等 BAF 完成 future pose 才做修正。** 每個 30-Hz 預測步驟先由 HMD／CSI 共同決定候選 pose 與融合權重，再將融合 pose 放入下一步 history。新設計、`1122` 評估依據與控制實驗見 [CSI motion experts](docs/README_MOTION_FUSION.md)。舊 checkpoint 按其儲存的 `method` 載入，不能拿舊 residual 結果代表新方法；新方法需要重新訓練。
 
 ## 一個入口：不指定 method 就全部跑
 
@@ -119,6 +121,7 @@ raw CSI 必須有實測 timestamps、availability 與正確 subcarrier frequenci
 
 | 文件 | 內容 |
 |---|---|
+| [CSI motion experts](docs/README_MOTION_FUSION.md) | 1122 評估依據、CSI 進入 expert 與 router、二／三／四分支、validation 退步限制與控制實驗 |
 | [共同入口與操作](docs/README_EXPERIMENTS.md) | `--method`、相依模型、cache/checkpoint 重用、輸出、繪圖 |
 | [原 heatmap 演算法](docs/README_HEATMAP_ALGORITHM.md) | AoA–ToF、因果對齊、CNN／GRU、residual、terminal expert gate |
 | [新的 alpha-only 演算法](docs/README_HEATMAP_ALPHA.md) | 簡單 RF features、161 參數 gate、真正的逐步 α fusion、訓練與 fallback |

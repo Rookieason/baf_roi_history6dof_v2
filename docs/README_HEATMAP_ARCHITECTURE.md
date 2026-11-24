@@ -2,6 +2,8 @@
 
 四種方法的主要入口是 [共同實驗 runner](README_EXPERIMENTS.md)；新增只改 α 的演算法見 [ALPHA](README_HEATMAP_ALPHA.md)。以下保留較低階的資料／模型 API。
 
+目前預設模型為 [CSI-conditioned internal motion experts](README_MOTION_FUSION.md)。本文資料契約共用；標示 residual／expert_gate 的 API 是保留的歷史控制組。
+
 演算法與理由見 [ALGORITHM](README_HEATMAP_ALGORITHM.md)，實驗解讀見 [EVALUATION](README_HEATMAP_EVALUATION.md)。本文件說明真正實作的邊界，不把尚未接上的硬體或 renderer 畫成已完成系統。
 
 ## 1. 系統資料流
@@ -18,7 +20,7 @@ flowchart TD
     F --> I
     H --> I
     I --> J[ForecastDataset：inputs 與 future targets 分離]
-    J --> K[HMD-only / HMD+RF adapter train]
+    J --> K[HMD-only / HMD+RF internal experts 或 legacy adapter train]
     K --> L[validation 選 checkpoint / coverage margin]
     G --> M[同 origins test evaluation]
     L --> M
@@ -26,7 +28,7 @@ flowchart TD
     M --> N[per_origin.csv、metrics、paired bootstrap、plots]
 ```
 
-Online path 是：observed HMD + 已完成且可取得的 map → 原 BAF forecast → adapter → hard ROI。硬體 acquisition、clock synchronization、網路與渲染器在套件外；本版 RF store 是 NPZ snapshot，不是假裝存在的持續更新感測 driver。
+目前預設 online path 是：observed HMD + 已可取得的 map → joint motion features → 每一步 conditioned experts／router／fusion → hard ROI。有效 CSI 的推論不先執行完整 BAF rollout；只有 fallback 執行原 BAF。舊 residual／expert_gate 的路徑仍是 BAF forecast → adapter。硬體 acquisition、clock synchronization、網路與渲染器在套件外；RF store 是 NPZ snapshot。
 
 ## 2. 檔案與 function 分工
 
@@ -41,6 +43,9 @@ baf_roi_heatmap/
   manifest.py                    需核對的 recording / clock mapping 模板
   prepare.py                     frozen BAF/F/E/fixed rollouts + GT cache
   model.py                       HMD/RF encoders、residual / expert_gate
+  motion.py                      CSI-conditioned latent experts、逐步 routing／rollout
+  motion_training.py             pose/ROI 訓練與每個 horizon 的 validation 退步限制
+  motion_runtime.py              直接執行內部 fusion；不預先完成 BAF rollout
   losses.py                      pose + soft ROI loss、精確 fallback
   train.py                       adapter 訓練與 validation checkpoint
   runtime.py                     online prediction API 與 batch-one benchmark

@@ -1,5 +1,7 @@
 # Heatmap 演算法、研究理由與 Pseudocode
 
+**歷史控制組文件。** 當前 `baf_roi_heatmap` 預設為 [CSI-conditioned internal motion experts](README_MOTION_FUSION.md)，不是本文的 residual。本文保留舊 `--heatmap-adapter residual|expert_gate` 的資料處理與演算法對照。
+
 本文件說明既有 `baf_roi_heatmap/` 的 residual／terminal expert_gate。新增的 `baf_roi_heatmap_alpha/` 是第三條 RF 路徑，僅修改原 BAF autoregressive rollout 裡的 α，詳見 [alpha-only 演算法](README_HEATMAP_ALPHA.md)。四種正式 models 的執行方式見 [共同入口](README_EXPERIMENTS.md)。
 
 **資料來源：** 目前 `recorded_20261031` 訓練 profile 讀取 `intermediates/<session>/heatmaps/<session>_heatmaps.npz` 內已生成的 AoA–ToF dB 數值；不在 training batch 重算 MUSIC。`generate` 是只有 raw CSI 時可獨立使用的工具。預先產生不等於可以使用 future information，仍須依完整 raw support 與 availability 對齊。

@@ -176,6 +176,29 @@ def test_existing_prepared_horizons_cannot_be_silently_changed(tmp_path):
         runner.run(args)
 
 
+def test_reused_legacy_checkpoint_is_not_reported_as_default_motion_moe(tmp_path, monkeypatch):
+    import torch
+    import baf_roi_heatmap.prepare as prepare
+    cache = _fake_cache(tmp_path, monkeypatch)
+    baseline = tmp_path/'baf.pt'; baseline.write_text('baseline')
+    adapter = tmp_path/'legacy.pt'
+    torch.save({'model_config': {'method': 'residual', 'modality': 'rf'},
+                'objective': 'roi_iou', 'aggregation': 'origin'}, adapter)
+    rf = tmp_path/'rf.json'; rf.write_text('{}')
+    monkeypatch.setattr(runner, '_check_checkpoint', lambda *args: None)
+    monkeypatch.setattr(prepare, 'prepare', lambda *args: None)
+    monkeypatch.setitem(sys.modules, 'roi_experiments.evaluation', SimpleNamespace(
+        evaluate=lambda *a, **k: report('legacy'), evaluate_pose=lambda *a, **k: report()))
+    out = tmp_path/'out'
+    args = runner.parser().parse_args(['--cache', str(cache), '--rf-manifest', str(rf),
+                                      '--method', 'baf_roi_heatmap', '--baseline-checkpoint', str(baseline),
+                                      '--heatmap-checkpoint', str(adapter), '--output', str(out)])
+    runner.run(args)
+    saved = json.loads((out/'experiment.json').read_text())
+    assert saved['heatmap_adapter'] == 'residual'
+    assert saved['heatmap_objective'] == 'roi_iou' and saved['heatmap_aggregation'] == 'origin'
+
+
 @pytest.mark.parametrize('raises', [False, True])
 def test_recorded_guard_covers_work_and_stops_after_success_or_error(tmp_path, monkeypatch, raises):
     import baf_roi_heatmap.recorded as recorded

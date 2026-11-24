@@ -12,7 +12,7 @@ import pandas as pd
 
 LABELS = {
     'baf_roi': 'BAF', 'motion_transformer_roi': 'Motion Transformer',
-    'baf_roi_heatmap': 'BAF + heatmap residual',
+    'baf_roi_heatmap': 'BAF + CSI',
     'baf_roi_heatmap_alpha': 'BAF + heatmap alpha',
 }
 MATCH_FIELDS = (
@@ -155,10 +155,15 @@ def training_histories(run, methods):
                           else 'valid.loss_total')
             if validation not in values or values[validation].dropna().empty:
                 continue
-            best = (values[validation].idxmax() if validation.endswith('iou')
-                    else values[validation].idxmin())
+            eligible = (values[values['selection_eligible'].fillna(True).astype(bool)]
+                        if 'selection_eligible' in values else values)
+            if eligible[validation].dropna().empty:
+                continue
+            best = (eligible[validation].idxmax() if validation.endswith('iou')
+                    else eligible[validation].idxmin())
             result.append(dict(method=method, stage=stage, values=values, validation=validation,
                                best_history_epoch=int(best),
+                               eligibility_filtered='selection_eligible' in values,
                                first_validation=float(values[validation].dropna().iloc[0]),
                                best_validation=float(values.loc[best, validation]),
                                last_validation=float(values[validation].dropna().iloc[-1])))
@@ -354,13 +359,17 @@ def render(evaluations, run, output):
             loss_ax.set(title=f"{label(history['method'])} / {history['stage']}", ylabel='Loss (within this stage only)')
             val_ax.plot(values.index, values[history['validation']], color='C1', label=history['validation'])
             val_ax.axvline(history['best_history_epoch'], color='black', linestyle='--',
-                           label=f"Best in history: epoch {history['best_history_epoch']}")
+                           label=f"Best eligible in history: epoch {history['best_history_epoch']}")
+            if 'selection_eligible' in values:
+                rejected = values[~values['selection_eligible'].fillna(True).astype(bool)]
+                val_ax.scatter(rejected.index, rejected[history['validation']], marker='x', color='red',
+                               label='Rejected by validation limits', zorder=4)
             val_ax.set(ylabel='Recording-macro IoU' if history['validation'].endswith('iou') else 'Validation loss')
             for ax in (loss_ax, val_ax):
                 ax.set_xlabel('Epoch (stage-local)')
                 ax.grid(alpha=.22)
                 ax.legend(fontsize=8)
-        save(fig, '10_training', 'Training and validation | best epoch from history; losses have different scales')
+        save(fig, '10_training', 'Training and validation | best eligible epoch from history; losses have different scales')
 
     average = primary.loc[primary.aggregation == 'pooled'].groupby('method')[
         ['iou_mean', 'f1_micro', 'coverage_micro', 'precision_micro', 'translation_mean_m', 'rotation_mean_deg']].mean()

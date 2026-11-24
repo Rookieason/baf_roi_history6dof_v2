@@ -7,6 +7,7 @@ baf_roi_heatmap_alpha/. Importing the CLI does not require loading PyTorch.
 import argparse
 from contextlib import contextmanager
 import csv
+from dataclasses import asdict
 import json
 import math
 import os
@@ -67,16 +68,25 @@ def parser():
     p.add_argument('--smoke-epochs', type=int,
                    help='Explicit software-test override for ALL stages/models; outputs are marked as smoke tests.')
     p.add_argument('--lr', type=float, default=.001, help='Learning rate of the two heatmap adapters.')
-    p.add_argument('--heatmap-objective', choices=['roi_iou', 'pose_roi'], default='roi_iou',
-                   help='ROI IoU surrogate, or the legacy pose + weighted Tversky loss.')
-    p.add_argument('--heatmap-aggregation', choices=['recording', 'origin'], default='origin',
-                   help='Residual adapter: origin-uniform optimization, or optional recording-macro weighting.')
+    p.add_argument('--heatmap-objective', choices=['roi_iou', 'pose_roi'],
+                   help='Default: pose_roi for internal motion experts; roi_iou for legacy adapters and alpha-only.')
+    p.add_argument('--heatmap-aggregation', choices=['recording', 'origin'],
+                   help='Default: recording for internal motion experts; origin for legacy adapters.')
     p.add_argument('--alpha-aggregation', choices=['recording', 'origin'], default='recording',
                    help='Alpha-only gate: default recording-macro weighting.')
-    p.add_argument('--heatmap-adapter', choices=['residual', 'expert_gate'], default='residual')
+    p.add_argument('--heatmap-adapter', choices=['motion_moe', 'residual', 'expert_gate'], default='motion_moe',
+                   help='Default: CSI inside BAF motion experts and per-step routing. Other choices reproduce legacy adapters.')
+    p.add_argument('--motion-experts', type=int, choices=[2, 3, 4], default=3)
+    p.add_argument('--motion-conditioning', choices=['joint', 'router_only'], default='joint',
+                   help='joint conditions expert latent features and trains pose heads; router_only freezes original experts.')
+    p.add_argument('--heatmap-ablation', choices=['full', 'spatial_mean', 'last_frame', 'angle_only', 'delay_only', 'abs_change', 'metadata_only'], default='full')
+    p.add_argument('--validation-coverage-drop', type=float, default=.005,
+                   help='Motion model selection: maximum per-horizon validation micro-coverage drop from BAF (fraction).')
+    p.add_argument('--validation-translation-increase-m', type=float, default=.005)
+    p.add_argument('--validation-rotation-increase-deg', type=float, default=.5)
     p.add_argument('--modality', choices=['rf', 'hmd'], default='rf',
-                   help='Existing baf_roi_heatmap adapter only; hmd is its capacity-matched ablation.')
-    p.add_argument('--hidden', type=int, default=32, help='Existing baf_roi_heatmap adapter hidden width.')
+                   help='baf_roi_heatmap only; hmd ignores RF pixels, timing and availability for a matched architecture control.')
+    p.add_argument('--hidden', type=int, default=32, help='baf_roi_heatmap context hidden width.')
     p.add_argument('--split', choices=['valid', 'test'], default='test')
     p.add_argument('--margins', type=float, nargs='+', default=[0., 5., 10., 20.],
                    help='Shared prediction-side angular margin sweep in degrees. Ground-truth FoV is fixed.')
@@ -92,6 +102,11 @@ def _validate_options(a):
             raise ValueError(f'--{name.replace("_", "-")} must be positive.')
     if a.hidden < 4 or not math.isfinite(a.lr) or a.lr <= 0:
         raise ValueError('--hidden must be >= 4 and --lr must be finite and positive.')
+    if a.heatmap_adapter == 'motion_moe' and a.motion_conditioning == 'router_only' and a.motion_experts != 2:
+        raise ValueError('--motion-conditioning router_only requires --motion-experts 2.')
+    for name in ('validation_coverage_drop', 'validation_translation_increase_m', 'validation_rotation_increase_deg'):
+        if not math.isfinite(getattr(a, name)) or getattr(a, name) < 0:
+            raise ValueError(f'--{name.replace("_", "-")} must be finite and nonnegative.')
     if not math.isfinite(a.delivery_delay_ms) or a.delivery_delay_ms < 0:
         raise ValueError('--delivery-delay-ms must be finite and nonnegative.')
     if not a.margins or len(set(a.margins)) != len(a.margins) or any(not math.isfinite(x) or x < 0 for x in a.margins):
@@ -212,6 +227,9 @@ def _source_plan(a, methods):
             'recorded_heatmap_import': recorded_import, 'horizons_ms': horizons,
             'margins_deg': a.margins, 'reused_checkpoints': supplied,
             'default_config': str(DEFAULT_CONFIG), 'smoke_epochs': a.smoke_epochs,
+            'heatmap_model': {'method': a.heatmap_adapter, 'experts': a.motion_experts,
+                              'conditioning': a.motion_conditioning, 'modality': a.modality,
+                              'objective': a.heatmap_objective or ('pose_roi' if a.heatmap_adapter == 'motion_moe' else 'roi_iou')},
             'evaluation': 'One shared ROI metric engine; common origins, targets, scene, horizons, and partition ordering.'}
     return plan, config
 
@@ -261,6 +279,17 @@ def _train_selected(a, out, plan, cfg, device):
     alpha_epochs = a.alpha_epochs or heat_epochs
     checkpoints = plan['reused_checkpoints'].copy()
     roles = {name: 'reused' for name in checkpoints}
+    heatmap_config = None
+    heatmap_objective = a.heatmap_objective or ('pose_roi' if a.heatmap_adapter == 'motion_moe' else 'roi_iou')
+    heatmap_aggregation = a.heatmap_aggregation or ('recording' if a.heatmap_adapter == 'motion_moe' else 'origin')
+    if 'baf_roi_heatmap' in checkpoints:
+        import torch
+        # Reusing a legacy checkpoint must not relabel its results with today's
+        # motion_moe defaults in experiment.json. The evaluator verifies identity.
+        reused = torch.load(checkpoints['baf_roi_heatmap'], map_location='cpu', weights_only=True)
+        heatmap_config = asdict(ModelConfig(**reused['model_config']).validate())
+        heatmap_objective = reused.get('objective', 'pose_roi')
+        heatmap_aggregation = reused.get('aggregation', 'origin')
     if prepared:
         m = _read(prepared / 'manifest.json')
         baseline = str(Path(m['baseline_checkpoint']).resolve())
@@ -303,15 +332,20 @@ def _train_selected(a, out, plan, cfg, device):
             path = train(cache_path, out / ('models/' + method), device, a.smoke_epochs or a.mt_epochs, batch, seed)
         elif method == 'baf_roi_heatmap':
             from baf_roi_heatmap.train import train
-            config = ModelConfig(method=a.heatmap_adapter, modality=a.modality, hidden=a.hidden)
+            config = ModelConfig(method=a.heatmap_adapter, modality=a.modality, hidden=a.hidden,
+                                 ablation=a.heatmap_ablation, experts=a.motion_experts, conditioning=a.motion_conditioning)
+            heatmap_config = asdict(config)
             path = train(prepared, out / ('models/' + method), config, epochs=a.smoke_epochs or heat_epochs,
                          batch_size=batch, lr=a.lr, seed=seed, device=device,
-                         objective=a.heatmap_objective, aggregation=a.heatmap_aggregation)
+                         objective=a.heatmap_objective, aggregation=a.heatmap_aggregation,
+                         validation_limits={'coverage_drop': a.validation_coverage_drop,
+                                            'translation_increase_m': a.validation_translation_increase_m,
+                                            'rotation_increase_deg': a.validation_rotation_increase_deg})
         elif method == 'baf_roi_heatmap_alpha':
             from baf_roi_heatmap_alpha.train import train
             path = train(prepared, out / ('models/' + method), epochs=a.smoke_epochs or alpha_epochs,
                          batch_size=batch, lr=a.lr, seed=seed, device=device,
-                         objective=a.heatmap_objective, aggregation=a.alpha_aggregation)
+                         objective=a.heatmap_objective or 'roi_iou', aggregation=a.alpha_aggregation)
         else:
             raise ValueError(f'Missing BAF checkpoint after dependency preparation: {method}')
         checkpoints[method], roles[method] = str(Path(path).resolve()), 'trained'
@@ -322,8 +356,12 @@ def _train_selected(a, out, plan, cfg, device):
             'checkpoint_sha256': {name: file_hash(path) for name, path in checkpoints.items()},
             'checkpoint_roles': roles, 'seed': seed, 'batch_size': batch, 'device': device,
             'smoke_test': a.smoke_epochs is not None, 'smoke_epochs': a.smoke_epochs,
-            'heatmap_adapter': a.heatmap_adapter, 'heatmap_modality': a.modality,
-            'heatmap_objective': a.heatmap_objective, 'heatmap_aggregation': a.heatmap_aggregation,
+            'heatmap_adapter': heatmap_config['method'] if heatmap_config else a.heatmap_adapter,
+            'heatmap_modality': heatmap_config['modality'] if heatmap_config else a.modality,
+            'heatmap_model_config': heatmap_config,
+            'heatmap_objective': heatmap_objective, 'heatmap_aggregation': heatmap_aggregation,
+            'heatmap_motion_experts': heatmap_config['experts'] if heatmap_config else a.motion_experts,
+            'heatmap_motion_conditioning': heatmap_config['conditioning'] if heatmap_config else a.motion_conditioning,
             'alpha_aggregation': a.alpha_aggregation,
             'complete': False, 'plan': plan}
 

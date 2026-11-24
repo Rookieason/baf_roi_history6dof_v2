@@ -125,21 +125,36 @@ def main(output, skip_plots=False):
         paired = json.loads((out/(method+'_paired.json')).read_text())
         assert all(r['cluster_percentile_ci95'] is None for r in paired['results'])
     # Exercise the user's actual one-script entry point without retraining its
-    # BAF/MT/residual dependencies. Only the new per-step alpha gate is trained.
+    # BAF/MT dependencies. Train internal CSI experts AND the alpha control.
     from roi_experiments.runner import parser as experiment_parser, run as run_experiment
     unified = out/'unified'
     run_experiment(experiment_parser().parse_args([
         '--prepared', str(out/'prepared'), '--motion-transformer-checkpoint', str(mt),
-        '--heatmap-checkpoint', str(methods['residual_rf']), '--smoke-epochs', '1',
+        '--smoke-epochs', '1', '--hidden', '8',
         '--batch-size', '32', '--device', 'cpu', '--output', str(unified),
     ]))
     unified_manifest = json.loads((unified/'experiment.json').read_text())
     assert unified_manifest['complete'] and len(unified_manifest['methods']) == 4
+    motion_checkpoint = unified_manifest['checkpoints']['baf_roi_heatmap']
+    motion_bundle = torch.load(motion_checkpoint, map_location='cpu', weights_only=True)
+    assert motion_bundle['model_config']['method'] == 'motion_moe'
+    motion_report = json.loads((unified/'evaluations/test/baf_roi_heatmap/report.json').read_text())
+    assert motion_report['motion_experts']['config']['experts'] == 3
+    # Exercise a trained internal model even when validation correctly retains
+    # the exact BAF epoch-zero checkpoint. This is software coverage, not a
+    # recommendation to deploy a validation-ineligible epoch.
+    trained_motion = unified/'models/baf_roi_heatmap/best_trained.pt'
+    evaluate(out/'prepared', out/'eval_motion_trained', checkpoint=trained_motion, margins=[0., 5.])
+    evaluate(out/'prepared', out/'eval_motion_delayed', checkpoint=trained_motion, delivery_delay_s=2.)
     evaluate(out/'prepared', out/'eval_delayed', checkpoint=methods['residual_rf'], delivery_delay_s=2.)
     a, b = read_rows(out/'eval_baf'), read_rows(out/'eval_delayed')
     assert len(a) == len(b)
     for original, delayed in zip(a, b):
         assert not delayed['rf_available']
+        for key in ('tp', 'fp', 'fn', 'tn', 'iou', 'translation_error_m', 'rotation_error_deg'):
+            assert original[key] == delayed[key], key
+    for original, delayed in zip(a, read_rows(out/'eval_motion_delayed')):
+        assert not delayed['rf_available'] and not delayed['correction_applied']
         for key in ('tp', 'fp', 'fn', 'tn', 'iou', 'translation_error_m', 'rotation_error_deg'):
             assert original[key] == delayed[key], key
     evaluate(out/'prepared', out/'eval_alpha_delayed',
@@ -165,6 +180,7 @@ def main(output, skip_plots=False):
               'matched_origins_per_horizon': len(dataset), 'horizons_ms': frozen['horizons_ms'],
               'frozen_baselines': 4, 'matched_motion_transformer': True, 'exact_missing_rf_fallback': True,
               'unified_methods': unified_manifest['methods'], 'alpha_only_gate': True,
+              'internal_motion_experts': True, 'exact_motion_missing_rf_fallback': True,
               'exact_alpha_missing_rf_fallback': True,
               'single_cluster_ci_correctly_undefined': True, 'plots': plot_count,
               'torch': str(torch.__version__), 'numpy': np.__version__, 'device': 'cpu'}

@@ -84,6 +84,8 @@ class InputConfig:
 
 @dataclass(frozen=True)
 class ModelConfig:
+    # Keep the legacy constructor default for programmatic adapter callers.
+    # Public train(config=None) and both CLIs default to motion_moe explicitly.
     method: str = 'residual'
     modality: str = 'rf'
     ablation: str = 'full'
@@ -91,10 +93,18 @@ class ModelConfig:
     max_translation_m: float = 0.2
     max_rotation_deg: float = 20.0
     max_logit_delta: float = 2.0
+    experts: int = 3
+    conditioning: str = 'joint'
 
     def validate(self):
-        if self.method not in ('residual', 'expert_gate') or self.modality not in ('rf', 'hmd'):
-            raise ValueError('method=residual|expert_gate; modality=rf|hmd.')
+        if self.method not in ('motion_moe', 'residual', 'expert_gate') or self.modality not in ('rf', 'hmd'):
+            raise ValueError('method=motion_moe|residual|expert_gate; modality=rf|hmd.')
+        if type(self.experts) is not int or not 2 <= self.experts <= 4:
+            raise ValueError('experts must be an integer in [2,4].')
+        if self.conditioning not in ('joint', 'router_only'):
+            raise ValueError('conditioning must be joint or router_only.')
+        if self.method == 'motion_moe' and self.conditioning == 'router_only' and self.experts != 2:
+            raise ValueError('router_only requires experts=2; duplicated frozen Explorer copies are not new motion experts.')
         if self.ablation not in ('full', 'spatial_mean', 'last_frame', 'angle_only', 'delay_only', 'abs_change', 'metadata_only'):
             raise ValueError('Unknown representation ablation.')
         if not isinstance(self.hidden, int) or self.hidden < 4:
