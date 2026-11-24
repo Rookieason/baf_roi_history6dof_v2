@@ -71,6 +71,18 @@ python scripts/run_experiments.py \
 
 主要輸出：`experiment.json`、`summary.csv`、`summary.json`、`models/<method>/`、`evaluations/test/<method>/per_origin.csv` 與 `report.json`。詳細 checkpoint 重用、通用資料來源與繪圖命令見 [共同入口使用說明](docs/README_EXPERIMENTS.md)。
 
+## 一個參數產生 evaluation 圖表
+
+```bash
+python scripts/plot_evaluation.py --path baf_roi_eval_1123_backtoorigin
+```
+
+`--path` 指向實驗輸出目錄即可；也支援 `evaluations/`、`evaluations/test/` 或單一 method 的評估目錄。每個 split 分開比較，輸出到指定目錄下的 `plots/<split>/`；開啟 `index.html` 可瀏覽所有圖表。重跑會更新相同名稱的圖表與報表。
+
+自動產生 PNG、PDF 及彙整 CSV，包含 IoU／F1／precision／coverage、相對 BAF 的差異、pooled／recording-macro／scenario-macro 比較、pose mean／P95 error、FP／FN／selected partitions、margin sweep 的 coverage–cost 曲線、scenario／recording 差異、IoU 分布與 origins 組成，以及各階段的 train／validation 曲線。各方法曲線若完全相同會重疊，可看 delta 圖確認。
+
+主要比較使用 margin 0；若沒有共同的 margin 0，使用所有 horizons／methods 共有的最小 margin，並標示在標題與 manifest。跨 horizons 的摘要採等權平均。程式會驗證 per-origin CSV 的 SHA-256、protocol、targets、RF cohort 與實際 origin IDs，拒絕將不匹配的資料混畫。訓練曲線標記的是 history 中 validation 最佳的 epoch；不讀取模型 checkpoint，也不需要 CUDA 或 PyTorch，僅使用既有依賴 numpy、pandas、matplotlib。
+
 ## Heatmap 是否預先產生？
 
 **目前 `recorded_20261031` 的訓練流程會讀取已產生的數值 heatmaps，不在每個 batch 重算 MUSIC。** 來源是設定中 dataset root 下的：
