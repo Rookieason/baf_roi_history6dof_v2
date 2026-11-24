@@ -14,8 +14,9 @@ METHODS = {
     method.name: method for method in (
         Method('baf_roi', 'Original BAF-Pose confidence and two pose experts'),
         Method('motion_transformer_roi', 'History-only Motion Transformer'),
-        Method('baf_roi_heatmap', 'Frozen BAF with the CSI forecast adapter', True, True),
+        Method('baf_roi_heatmap', 'Legacy post-forecast CSI adapter (comparison only)', True, True),
         Method('baf_roi_heatmap_alpha', 'CSI correction of BAF per-step alpha only', True, True),
+        Method('baf_roi_heatmap_residual', 'CSI residuals inside BAF expert features before pose decoding', True, True),
     )
 }
 

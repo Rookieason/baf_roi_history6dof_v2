@@ -1,8 +1,7 @@
 """One method registry, one data protocol, and one comparison report.
 
 This module orchestrates existing trainers. Neural models, losses, and inference
-stay in baf_roi/, motion_transformer_roi/, baf_roi_heatmap/, and
-baf_roi_heatmap_alpha/. Importing the CLI does not require loading PyTorch.
+stay in their method packages. Importing the CLI does not require loading PyTorch.
 """
 import argparse
 from contextlib import contextmanager
@@ -23,6 +22,7 @@ CHECKPOINT_ARGUMENTS = {
     'motion_transformer_roi': 'motion_transformer_checkpoint',
     'baf_roi_heatmap': 'heatmap_checkpoint',
     'baf_roi_heatmap_alpha': 'alpha_checkpoint',
+    'baf_roi_heatmap_residual': 'residual_checkpoint',
 }
 RESOURCE_CHECK_SECONDS = 5
 
@@ -42,7 +42,7 @@ def parser():
     p.add_argument('command', nargs='?', choices=['run', 'evaluate'], default='run',
                    help='run trains/reuses selected methods and evaluates them; evaluate reuses a completed run.')
     p.add_argument('--method', nargs='+', choices=['all', *METHODS],
-                   help='One or more model packages; omitted/all runs all four. For evaluate, omitted means all methods in that run.')
+                   help='One or more model packages; omitted/all runs all registered methods, including legacy comparisons. For evaluate, omitted means all methods in that run.')
     p.add_argument('--output', required=True, help='New or empty output directory; existing experiments are never overwritten.')
     source = p.add_mutually_exclusive_group()
     source.add_argument('--config', help='Pose configuration, or the recorded_20261031 profile. Default: %(default)s')
@@ -57,6 +57,7 @@ def parser():
     p.add_argument('--motion-transformer-checkpoint', help='Reuse Motion Transformer trained on the exact shared cache.')
     p.add_argument('--heatmap-checkpoint', help='Reuse an adapter trained on the exact prepared experiment.')
     p.add_argument('--alpha-checkpoint', help='Reuse an alpha adapter trained on the exact prepared experiment.')
+    p.add_argument('--residual-checkpoint', help='Reuse an internal feature residual trained on the exact prepared experiment.')
     p.add_argument('--device', default='auto')
     p.add_argument('--threads', type=int, default=2)
     p.add_argument('--batch-size', type=int, help='Default from the pose training config.')
@@ -64,15 +65,27 @@ def parser():
     p.add_argument('--mt-epochs', type=int, default=30)
     p.add_argument('--heatmap-epochs', type=int, help='Default from recorded_heatmaps.epochs, otherwise 20.')
     p.add_argument('--alpha-epochs', type=int, help='Default equal to heatmap-epochs.')
+    p.add_argument('--residual-epochs', type=int, help='Internal residual training epochs; default equal to heatmap-epochs.')
     p.add_argument('--smoke-epochs', type=int,
                    help='Explicit software-test override for ALL stages/models; outputs are marked as smoke tests.')
-    p.add_argument('--lr', type=float, default=.001, help='Learning rate of the two heatmap adapters.')
+    p.add_argument('--lr', type=float, default=.001, help='Learning rate of the heatmap modules.')
     p.add_argument('--heatmap-objective', choices=['roi_iou', 'pose_roi'], default='roi_iou',
                    help='ROI IoU surrogate, or the legacy pose + weighted Tversky loss.')
     p.add_argument('--heatmap-aggregation', choices=['recording', 'origin'], default='origin',
                    help='Residual adapter: origin-uniform optimization, or optional recording-macro weighting.')
     p.add_argument('--alpha-aggregation', choices=['recording', 'origin'], default='recording',
                    help='Alpha-only gate: default recording-macro weighting.')
+    p.add_argument('--residual-aggregation', choices=['recording', 'origin'], default='recording',
+                   help='Internal residual: default recording-macro weighting.')
+    p.add_argument('--residual-hidden', type=int, default=32, help='Internal residual RF context width.')
+    p.add_argument('--residual-bottleneck', type=int, default=32, help='Internal residual bottleneck width per expert.')
+    p.add_argument('--residual-max-relative-delta', type=float, default=.1,
+                   help='Per-coordinate latent residual cap relative to expert latent RMS; not a pose-error bound.')
+    p.add_argument('--residual-modality', choices=['rf', 'hmd'], default='rf',
+                   help='Internal residual: causal CSI, or HMD-only capacity control.')
+    p.add_argument('--residual-ablation', choices=['full', 'metadata_only', 'spatial_mean', 'last_frame',
+                                                 'angle_only', 'delay_only', 'abs_change'], default='full',
+                   help='Internal residual RF representation control.')
     p.add_argument('--heatmap-adapter', choices=['residual', 'expert_gate'], default='residual')
     p.add_argument('--modality', choices=['rf', 'hmd'], default='rf',
                    help='Existing baf_roi_heatmap adapter only; hmd is its capacity-matched ablation.')
@@ -86,12 +99,16 @@ def parser():
 
 
 def _validate_options(a):
-    for name in ('threads', 'batch_size', 'mt_epochs', 'heatmap_epochs', 'alpha_epochs', 'smoke_epochs'):
+    for name in ('threads', 'batch_size', 'mt_epochs', 'heatmap_epochs', 'alpha_epochs', 'residual_epochs', 'smoke_epochs'):
         value = getattr(a, name)
         if value is not None and value < 1:
             raise ValueError(f'--{name.replace("_", "-")} must be positive.')
     if a.hidden < 4 or not math.isfinite(a.lr) or a.lr <= 0:
         raise ValueError('--hidden must be >= 4 and --lr must be finite and positive.')
+    if a.residual_hidden < 4 or a.residual_bottleneck < 4:
+        raise ValueError('--residual-hidden and --residual-bottleneck must be >= 4.')
+    if not math.isfinite(a.residual_max_relative_delta) or not 0 < a.residual_max_relative_delta <= 1:
+        raise ValueError('--residual-max-relative-delta must lie in (0,1].')
     if not math.isfinite(a.delivery_delay_ms) or a.delivery_delay_ms < 0:
         raise ValueError('--delivery-delay-ms must be finite and nonnegative.')
     if not a.margins or len(set(a.margins)) != len(a.margins) or any(not math.isfinite(x) or x < 0 for x in a.margins):
@@ -259,6 +276,7 @@ def _train_selected(a, out, plan, cfg, device):
     batch = int(cfg['training'].get('batch_size', 64) if a.batch_size is None else a.batch_size)
     heat_epochs = a.heatmap_epochs or cfg.get('recorded_heatmaps', {}).get('epochs', 20)
     alpha_epochs = a.alpha_epochs or heat_epochs
+    residual_epochs = a.residual_epochs or heat_epochs
     checkpoints = plan['reused_checkpoints'].copy()
     roles = {name: 'reused' for name in checkpoints}
     if prepared:
@@ -277,7 +295,7 @@ def _train_selected(a, out, plan, cfg, device):
         if batch != int(cache.manifest['config']['training'].get('batch_size', 64)):
             raise ValueError('BAF trains with its cache batch size. For another size, use a new --config/cache or reuse --baseline-checkpoint.')
         from baf_roi.train import train
-        print('TRAIN baf_roi (also shared by both heatmap methods)', flush=True)
+        print('TRAIN baf_roi (shared by the heatmap methods)', flush=True)
         checkpoints['baf_roi'] = str(train(cache_path, out / 'models/baf_roi', device, a.smoke_epochs))
         roles['baf_roi'] = 'trained'
     for method in ('baf_roi', 'motion_transformer_roi'):
@@ -312,6 +330,16 @@ def _train_selected(a, out, plan, cfg, device):
             path = train(prepared, out / ('models/' + method), epochs=a.smoke_epochs or alpha_epochs,
                          batch_size=batch, lr=a.lr, seed=seed, device=device,
                          objective=a.heatmap_objective, aggregation=a.alpha_aggregation)
+        elif method == 'baf_roi_heatmap_residual':
+            from baf_roi_heatmap_residual.model import ResidualConfig
+            from baf_roi_heatmap_residual.train import train
+            config = ResidualConfig(hidden=a.residual_hidden, bottleneck=a.residual_bottleneck,
+                                    max_relative_delta=a.residual_max_relative_delta,
+                                    modality=a.residual_modality, ablation=a.residual_ablation)
+            path = train(prepared, out / ('models/' + method), config,
+                         epochs=a.smoke_epochs or residual_epochs, batch_size=batch, lr=a.lr,
+                         seed=seed, device=device, objective=a.heatmap_objective,
+                         aggregation=a.residual_aggregation)
         else:
             raise ValueError(f'Missing BAF checkpoint after dependency preparation: {method}')
         checkpoints[method], roles[method] = str(Path(path).resolve()), 'trained'
@@ -325,6 +353,10 @@ def _train_selected(a, out, plan, cfg, device):
             'heatmap_adapter': a.heatmap_adapter, 'heatmap_modality': a.modality,
             'heatmap_objective': a.heatmap_objective, 'heatmap_aggregation': a.heatmap_aggregation,
             'alpha_aggregation': a.alpha_aggregation,
+            'internal_residual_requested_config': {'modality': a.residual_modality, 'ablation': a.residual_ablation,
+                                  'hidden': a.residual_hidden, 'bottleneck': a.residual_bottleneck,
+                                  'max_relative_delta': a.residual_max_relative_delta,
+                                  'aggregation': a.residual_aggregation},
             'complete': False, 'plan': plan}
 
 
@@ -402,6 +434,7 @@ def _evaluate_selected(a, experiment, methods, output, device):
             elif name == 'motion_transformer_roi': options['motion_transformer_checkpoint'] = checkpoints[name]
             elif name == 'baf_roi_heatmap': options['checkpoint'] = checkpoints[name]
             elif name == 'baf_roi_heatmap_alpha': options['alpha_checkpoint'] = checkpoints[name]
+            elif name == 'baf_roi_heatmap_residual': options['residual_checkpoint'] = checkpoints[name]
             report = evaluate(experiment['prepared'], destination, split=a.split, device=device,
                               batch_size=batch_size, margins=a.margins,
                               delivery_delay_s=a.delivery_delay_ms/1000, **options)

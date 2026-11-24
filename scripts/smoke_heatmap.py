@@ -125,8 +125,9 @@ def main(output, skip_plots=False):
         paired = json.loads((out/(method+'_paired.json')).read_text())
         assert all(r['cluster_percentile_ci95'] is None for r in paired['results'])
     # Exercise the user's actual one-script entry point without retraining its
-    # BAF/MT/residual dependencies. Only the new per-step alpha gate is trained.
+    # BAF/MT/legacy adapter dependencies. Alpha and internal residual are trained.
     from roi_experiments.runner import parser as experiment_parser, run as run_experiment
+    from roi_experiments.methods import METHODS
     unified = out/'unified'
     run_experiment(experiment_parser().parse_args([
         '--prepared', str(out/'prepared'), '--motion-transformer-checkpoint', str(mt),
@@ -134,7 +135,7 @@ def main(output, skip_plots=False):
         '--batch-size', '32', '--device', 'cpu', '--output', str(unified),
     ]))
     unified_manifest = json.loads((unified/'experiment.json').read_text())
-    assert unified_manifest['complete'] and len(unified_manifest['methods']) == 4
+    assert unified_manifest['complete'] and unified_manifest['methods'] == list(METHODS)
     evaluate(out/'prepared', out/'eval_delayed', checkpoint=methods['residual_rf'], delivery_delay_s=2.)
     a, b = read_rows(out/'eval_baf'), read_rows(out/'eval_delayed')
     assert len(a) == len(b)

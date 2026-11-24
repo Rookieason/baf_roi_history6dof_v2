@@ -128,7 +128,7 @@ def test_motion_transformer_alone_needs_no_baf_or_rf(tmp_path, monkeypatch):
     assert saved['complete'] and len(calls) == 2
 
 
-def test_default_run_trains_four_methods_once_and_evaluates_one_prepared(tmp_path, monkeypatch):
+def test_default_run_trains_all_methods_once_and_evaluates_one_prepared(tmp_path, monkeypatch):
     import baf_roi.train as baf
     import motion_transformer_roi.train as mt
     import baf_roi_heatmap.train as heat
@@ -140,17 +140,20 @@ def test_default_run_trains_four_methods_once_and_evaluates_one_prepared(tmp_pat
     monkeypatch.setattr(heat, 'train', _trainer(calls, 'baf_roi_heatmap'))
     monkeypatch.setitem(sys.modules, 'baf_roi_heatmap_alpha.train', SimpleNamespace(
         train=_trainer(calls, 'baf_roi_heatmap_alpha')))
+    monkeypatch.setitem(sys.modules, 'baf_roi_heatmap_residual.train', SimpleNamespace(
+        train=_trainer(calls, 'baf_roi_heatmap_residual')))
     monkeypatch.setattr(runner, '_check_checkpoint', lambda *args: None)
     monkeypatch.setattr(prepare, 'prepare', lambda *args: calls.append(('prepare', str(args[0]), str(args[3]))))
     def evaluate(prepared, output, **kwargs):
         method = Path(output).name
         calls.append(('evaluate', method, str(prepared)))
         if method == 'baf_roi_heatmap_alpha': assert 'alpha_checkpoint' in kwargs
+        if method == 'baf_roi_heatmap_residual': assert 'residual_checkpoint' in kwargs
         if method == 'baf_roi_heatmap': assert 'checkpoint' in kwargs
         if method == 'motion_transformer_roi': assert 'motion_transformer_checkpoint' in kwargs
         return report(method)
     monkeypatch.setitem(sys.modules, 'roi_experiments.evaluation', SimpleNamespace(
-        evaluate=evaluate, evaluate_pose=lambda *a, **k: pytest.fail('All four must share the prepared evaluator')))
+        evaluate=evaluate, evaluate_pose=lambda *a, **k: pytest.fail('All methods must share the prepared evaluator')))
     out = tmp_path / 'out'
     (tmp_path / 'rf.json').write_text('{}')
     args = runner.parser().parse_args(['--cache', str(cache), '--rf-manifest', str(tmp_path / 'rf.json'),

@@ -1,0 +1,87 @@
+{
+  "date": "2026-11-24",
+  "branch": "feature/csi-internal-residual",
+  "source_base_sha": "e34a83687390771b25438874b78f164db1a99b47",
+  "scope": "SYNTHETIC SOFTWARE VALIDATION ONLY; no real-data efficacy claim",
+  "environment": {
+    "python": "3.12.14",
+    "torch": "2.15.0+cpu",
+    "numpy": "2.3.5",
+    "device": "cpu"
+  },
+  "pytest": {
+    "passed": 244,
+    "failed": 0,
+    "warnings": 8,
+    "duration_s": 35.26,
+    "new_method_tests": 23
+  },
+  "provenance_audit": {
+    "verified_source_files": 67,
+    "verified_verbatim_functions": 4,
+    "status": "PASS"
+  },
+  "full_synthetic_smoke": {
+    "status": "PASS",
+    "evidence_type": "SYNTHETIC SOFTWARE INTEGRATION ONLY",
+    "base_epochs_each_stage": 1,
+    "adapter_epochs": 1,
+    "adapter_methods": [
+      "residual_hmd",
+      "residual_rf",
+      "expert_gate_hmd",
+      "expert_gate_rf"
+    ],
+    "matched_origins_per_horizon": 181,
+    "horizons_ms": [
+      50,
+      250,
+      1000
+    ],
+    "frozen_baselines": 4,
+    "matched_motion_transformer": true,
+    "exact_missing_rf_fallback": true,
+    "unified_methods": [
+      "baf_roi",
+      "motion_transformer_roi",
+      "baf_roi_heatmap",
+      "baf_roi_heatmap_alpha",
+      "baf_roi_heatmap_residual"
+    ],
+    "alpha_only_gate": true,
+    "exact_alpha_missing_rf_fallback": true,
+    "single_cluster_ci_correctly_undefined": true,
+    "plots": 0,
+    "torch": "2.15.0+cpu",
+    "numpy": "2.3.5",
+    "device": "cpu"
+  },
+  "internal_synthetic_smoke": {
+    "status": "PASS",
+    "evidence_type": "SYNTHETIC SOFTWARE INTEGRATION ONLY",
+    "method": "baf_roi_heatmap_residual",
+    "train_epochs": 1,
+    "horizons_ms": [
+      50,
+      250,
+      1000
+    ],
+    "test_origins": 181,
+    "selected_epoch": 1,
+    "trained_checkpoint_reloaded": true,
+    "single_assisted_online_rollout": true,
+    "online_matches_direct_model": true,
+    "exact_delayed_rf_fallback": true,
+    "online_error_preserves_observed_state": true,
+    "unified_reevaluation": true,
+    "torch": "2.15.0+cpu",
+    "numpy": "2.3.5",
+    "device": "cpu"
+  },
+  "not_measured": [
+    "real_recording_ROI_gain",
+    "rendered_visual_quality",
+    "full_system_30Hz",
+    "CUDA_execution"
+  ]
+}

@@ -1,17 +1,18 @@
-# 四種 ROI 方法的共同執行與評估
+# 五種 ROI 方法的共同執行與評估
 
-本分支以 `scripts/run_experiments.py` 作為共同入口。`--method` 指定要執行的方法；省略時，會依序處理四種方法，並把結果放進同一份比較表。
+本分支以 `scripts/run_experiments.py` 作為共同入口。`--method` 指定要執行的方法；省略時，會依序處理五種方法（含歷史比較），並把結果放進同一份比較表。本分支主方法為 `baf_roi_heatmap_residual`，設計與操作詳見 [內部 residual](README_INTERNAL_RESIDUAL.md)；可用 `bash scripts/train_csi_internal_residual.sh` 跑 BAF／MT／內部 residual 三組。
 
 以下指令皆假設目前位於 repository 根目錄，且使用已安裝 `requirements-heatmap.txt` 的 Python 環境。`python -m roi_experiments` 與 `python scripts/run_experiments.py` 等價。
 
-## 1. 四種方法與程式責任
+## 1. 五種方法與程式責任
 
 | `--method` 名稱 | 演算法程式碼 | 輸入與作用 | 是否需要 BAF checkpoint |
 |---|---|---|---|
 | `baf_roi` | `baf_roi/` | 原始 HMD history → Confidence、Focused、Explorer → 逐步融合姿態 → ROI | 本身訓練或載入 BAF |
 | `motion_transformer_roi` | `motion_transformer_roi/` | 相同 HMD history → Motion Transformer → 未來姿態 → ROI | 不需要 |
-| `baf_roi_heatmap` | `baf_roi_heatmap/` | 凍結 BAF，加上 HMD／heatmap adapter；預設為 `residual` 姿態修正 | 需要，共用相同的凍結 BAF |
+| `baf_roi_heatmap` | `baf_roi_heatmap/` | 歷史比較：凍結 BAF 完成預測後，執行 HMD／heatmap adapter | 需要，共用相同的凍結 BAF |
 | `baf_roi_heatmap_alpha` | `baf_roi_heatmap_alpha/` | Heatmap 只修正 BAF rollout 每一步的 α，維持原本兩個姿態專家 | 需要，共用相同的凍結 BAF |
+| `baf_roi_heatmap_residual` | `baf_roi_heatmap_residual/` | 每一步在兩個 expert 的 latent 加入 CSI residual，再經原輸出 heads 產生姿態 | 需要，共用相同的凍結 BAF |
 
 `roi_experiments/` 放共同的 method registry、工作流程、評估、彙整與繪圖。各方法的模型與訓練演算法仍由上表對應的套件負責。Heatmap 方法可以重用 `baf_roi/` 的凍結專家，以及既有 heatmap 資料載入器。
 
@@ -19,7 +20,7 @@
 
 ## 2. 最直接的執行方式
 
-### 使用目前的 20261031 recording 設定，完整跑四個方法
+### 使用目前的 20261031 recording 設定，完整跑五個方法
 
 ```bash
 python scripts/run_experiments.py \
@@ -29,7 +30,7 @@ python scripts/run_experiments.py \
 
 `run` 是預設命令，也可以明寫成 `python scripts/run_experiments.py run ...`。省略 `--config`、`--cache`、`--prepared` 三者時，預設採用 `configs/recorded_20261031.json`。
 
-此流程只準備一次共同 pose cache、只訓練一次 BAF，再讓兩個 heatmap 方法共用這份 BAF。Motion Transformer 使用同一個 pose cache。四個方法最後使用同一份 prepared origins、ground truth、scene 與 horizons 評估。
+此流程只準備一次共同 pose cache、只訓練一次 BAF，再讓三個 heatmap 方法共用這份 BAF。Motion Transformer 使用同一個 pose cache。五個方法最後使用同一份 prepared origins、ground truth、scene 與 horizons 評估。
 
 ### 只跑一種方法
 
@@ -60,7 +61,7 @@ bash scripts/train_csi_20261031.sh
 bash scripts/train_csi_20261031.sh --method baf_roi_heatmap_alpha
 ```
 
-Launcher 內的 Python、run root 與 device 仍是機器設定；第一次換機器時，先調整這些設定。未指定 method 的第一個指令會跑四個方法。Launcher 會印出 PID、輸出目錄與 log 路徑；直接使用 Python 入口則在目前終端執行。
+Launcher 內的 Python、run root 與 device 仍是機器設定；第一次換機器時，先調整這些設定。未指定 method 的第一個指令會跑五個方法。Launcher 會印出 PID、輸出目錄與 log 路徑；直接使用 Python 入口則在目前終端執行。
 
 ## 3. 選擇資料入口：config、cache、prepared
 
@@ -169,7 +170,11 @@ python scripts/run_experiments.py evaluate \
 | `--mt-epochs 30` | MT 訓練上限；保留其既有 validation early stopping |
 | `--heatmap-epochs 20` | 原有 heatmap adapter epochs；未指定時採 recorded profile 設定，否則 20 |
 | `--alpha-epochs 20` | Alpha adapter epochs；未指定時與 heatmap epochs 相同 |
-| `--lr 0.001` | 兩種 heatmap adapter 的 learning rate |
+| `--lr 0.001` | Heatmap 模組的 learning rate |
+| `--residual-epochs 20` | 新內部 residual 的訓練 epochs |
+| `--residual-checkpoint <path>` | 重用相同 prepared experiment 的內部 residual checkpoint |
+| `--residual-modality hmd` | 內部 residual 的 HMD-only residual-head 控制 |
+| `--residual-ablation metadata_only` | 內部 residual 的 RF 內容消融；保留 RF timing／mask |
 | `--heatmap-adapter residual` | `baf_roi_heatmap` 使用 residual；可改成 `expert_gate` |
 | `--modality hmd` | 原有 heatmap adapter 的 HMD-only 容量對照；不會把 alpha method 改成其他模型 |
 | `--margins 0 5 10 20` | 共同的預測 FoV margin sweep，預設就是這四個值 |
@@ -200,13 +205,13 @@ Dry-run 列出方法、BAF 依賴、資料入口、horizons 與 margins，不會
 - 相同 pose cache、train／valid／test split、HMD normalization 與 30-frame／30-Hz history。
 - 相同 scene、partition IDs 及其順序、ground-truth FoV 與 exact prediction horizons。
 - 只採用在**所有指定 horizons** 都有 ground truth 的共同 origins；不讓某方法只評估比較容易的短 horizon samples。
-- 兩個 heatmap 方法共用相同的已訓練 BAF；CSI adapter 訓練不修改原有 BAF 專家權重。
+- 三個 heatmap 方法共用相同的已訓練 BAF；CSI 模組訓練不修改原有 BAF 專家權重。內部 residual 的梯度仍穿過原 heads 與完整 rollout。
 - Heatmap normalization 只由 training recordings 擬合；每個 origin 只讀取在當時已可取得、且符合時間窗限制的 RF 資料。
 - 全部方法都由同一個 metric engine 算 ROI；沒有可用 RF 的 origin 仍保留在全體評估，並另外提供 RF-available 子集合。
 
 輸出不是只比較 sample count。彙整時還要求 evaluation protocol、origin ID、target bytes、RF 可用樣本集合、額外接收延遲、scene、split 與 horizons 的識別資訊一致。不一致時會停止比較。
 
-同一模型單獨執行與放入四模型比較時，使用同一組 ROI 指標定義。若另一次獨立訓練改了 seed、cache 或 checkpoint，那就是另一個實驗；不應把權重差異解讀成 CSI 的作用。
+同一模型單獨執行與放入多模型比較時，使用同一組 ROI 指標定義。若另一次獨立訓練改了 seed、cache 或 checkpoint，那就是另一個實驗；不應把權重差異解讀成 CSI 的作用。
 
 ## 9. 評估指標與先前 PPT 的對應
 
@@ -260,9 +265,9 @@ Margin 只擴張**預測端**的 FoV，ground-truth FoV 不變。以目前 110°
 | `experiment.json` | Checkpoint 路徑／雜湊、cache／prepared、方法與是否完成 |
 | `evaluations/test/<method>/report.json` | 每個 method 的 pooled、recording／scenario summary 與 protocol |
 | `evaluations/test/<method>/per_origin.csv` | 逐 origin、horizon、margin 的計數與誤差，可追查比較內容 |
-| `summary.csv`、`summary.json` | 四方法共同比較表；validation 時對應路徑改為 `evaluations/valid/` |
+| `summary.csv`、`summary.json` | 所選方法共同比較表；validation 時對應路徑改為 `evaluations/valid/` |
 
-使用同一次四方法評估的結果繪圖：
+使用同一次配對評估的結果繪圖：
 
 ```bash
 python -m roi_experiments.plot \

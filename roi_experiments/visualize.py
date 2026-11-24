@@ -12,8 +12,9 @@ import pandas as pd
 
 LABELS = {
     'baf_roi': 'BAF', 'motion_transformer_roi': 'Motion Transformer',
-    'baf_roi_heatmap': 'BAF + heatmap residual',
+    'baf_roi_heatmap': 'BAF + post-forecast residual (legacy)',
     'baf_roi_heatmap_alpha': 'BAF + heatmap alpha',
+    'baf_roi_heatmap_residual': 'BAF + internal CSI residual',
 }
 MATCH_FIELDS = (
     'experiment_id', 'scene_id', 'split', 'horizons_ms', 'margins_deg',

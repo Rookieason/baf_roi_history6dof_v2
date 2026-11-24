@@ -1,21 +1,52 @@
-# CSI-assisted ROI Selection：四種方法、共同實驗入口
+# CSI-assisted BAF：內部特徵 Residual
 
 研究問題：在相同 HMD history、資料切分、future horizons 與 ROI 幾何下，當下已可取得的 CSI heatmap，能否提供超出 HMD history 的資訊，讓未來 partition selection 更準確？
 
-本分支為 `feature/csi-heatmap-fusion`。原 baseline 文件保存在 [README_BASELINE.md](README_BASELINE.md)。BAF 與 Motion Transformer 的模型仍在各自套件；此次統一了實驗入口與評估，並修正 BAF 不規則 decision gaps 的 observed α reset。原作者 `vendor/` 與 extracted model/fusion operators 不變。
+本分支為 **`feature/csi-internal-residual`**，從 `feature/csi-heatmap-fusion` 的 `e34a836` 建立。主要方法為 **`baf_roi_heatmap_residual`**：CSI heatmap 在 Focused／Explorer 產生下一步姿態之前，補充兩個 expert 的內部特徵。Residual 的定義為 **BAF latent + CSI-conditioned latent residual**。原本的 post-forecast adapter 保留作歷史比較，不代表本分支的新方法。
 
-## 四種方法
+每一步都先計算 HMD latent → 加入 heatmap residual → 使用原 BAF translation／rotation heads → 原 α fusion → 將預測姿態放入下一步 history。有效 CSI 的線上路徑只執行一次這樣的 rollout；不先完成另一條 BAF forecast，也沒有在輸出姿態上加 `Δp`／`Δrotation`。
+
+完整研究動機、公式、訓練方式、控制實驗與限制見 **[內部 residual 設計與操作說明](docs/README_INTERNAL_RESIDUAL.md)**。原 baseline 文件仍在 [README_BASELINE.md](README_BASELINE.md)。
+
+## 先跑本分支的主要比較
+
+```bash
+bash scripts/train_csi_internal_residual.sh
+```
+
+這會依照既有 `recorded_20261031` 設定，在背景執行 **BAF、Motion Transformer、內部 CSI residual**，共用同一份資料與 BAF checkpoint。機器路徑沿用 `scripts/train_csi_20261031.sh`。也可直接使用共同 Python 入口：
+
+```bash
+python scripts/run_experiments.py \
+  --config configs/recorded_20261031.json \
+  --method baf_roi motion_transformer_roi baf_roi_heatmap_residual \
+  --output runs/internal_residual_01
+```
+
+已經有相容的 `prepared/` 時，可直接重用已訓練 BAF 與資料，只訓練新的內部 residual：
+
+```bash
+python scripts/run_experiments.py \
+  --prepared /absolute/path/to/previous_run/prepared \
+  --method baf_roi baf_roi_heatmap_residual \
+  --output runs/internal_residual_reuse_01
+```
+
+新 checkpoint 是 `models/baf_roi_heatmap_residual/residual.pt`。舊的 `adapter.pt`、`alpha.pt` 不能當成這個模型的權重；既有 BAF checkpoint 可以重用。軟體驗證使用合成資料，尚未取得本方法在真實 held-out recordings 上的訓練結果。
+
+## 五種方法與比較組
 
 | `--method` | 程式位置 | HMD／heatmap 的角色 |
 |---|---|---|
 | `baf_roi` | `baf_roi/` | 原 BAF-Pose：Confidence + Focused + Explorer |
 | `motion_transformer_roi` | `motion_transformer_roi/` | HMD history → Motion Transformer → future pose |
-| `baf_roi_heatmap` | `baf_roi_heatmap/` | 預設 residual：HMD／heatmap encoder 修正凍結 BAF 的 future pose；保留 `expert_gate` 比較組 |
+| `baf_roi_heatmap` | `baf_roi_heatmap/` | 歷史比較：HMD／heatmap encoder 修正完成的 BAF future pose；保留 terminal `expert_gate` |
 | `baf_roi_heatmap_alpha` | `baf_roi_heatmap_alpha/` | 8 個 heatmap 統計量 → 161 參數小 gate；只修正 BAF 每個 autoregressive step 的 α |
+| **`baf_roi_heatmap_residual`** | **`baf_roi_heatmap_residual/`** | **本分支主方法：有空間結構與時間順序的 RF encoder → 兩個 expert 的 latent residual → 原輸出 heads 與逐步 fusion** |
 
-`roi_experiments/` 負責 method registry、執行順序、共同 evaluator、摘要及圖表，不放第五種模型。兩個 heatmap 方法共用原 BAF experts、因果 RF 資料介面及 ROI 幾何。新的 alpha 方法不是原 `expert_gate` 的改名：它確實改變每一步 fusion 和之後的預測 history。
+`roi_experiments/` 負責 method registry、執行順序、共同 evaluator、摘要及圖表。模型各在自己的套件，三個 heatmap 方法共用原 BAF checkpoint、因果 RF 資料介面及 ROI 幾何。`alpha` 改變 expert 的混合比例；新的內部 residual 改變 expert 在輸出姿態之前的特徵，兩者有不同的作用點。
 
-## 一個入口：不指定 method 就全部跑
+## 一個入口：不指定 method 就全部跑（包含歷史比較）
 
 ```bash
 python -m pip install -r requirements-heatmap.txt
@@ -39,7 +70,7 @@ python scripts/run_experiments.py \
   --output runs/baselines_01
 ```
 
-預設依設定跑 50–1000 ms、每 50 ms 一個 horizon；四種方法共用同一份 cache／split、同一份 frozen BAF，以及同一組所有 horizons 都有 GT 的 origins。BAF 是兩個 heatmap 方法的依賴，即使只選 heatmap method，也需要訓練或重用 BAF。只選 HMD baselines 時不要求 RF 檔案；MT-only 不會額外訓練 BAF。
+預設依設定跑 50–1000 ms、每 50 ms 一個 horizon；五種方法共用同一份 cache／split，以及同一組所有 horizons 都有 GT 的 origins。三個 heatmap 方法共用 frozen BAF；即使只選 heatmap method，也需要訓練或重用 BAF。只選 HMD baselines 時不要求 RF 檔案；MT-only 不會額外訓練 BAF。
 
 機器路徑已寫在既有 shell script 開頭時，也可以直接：
 
@@ -48,7 +79,7 @@ bash scripts/train_csi_20261031.sh
 bash scripts/train_csi_20261031.sh --method baf_roi_heatmap_alpha
 ```
 
-這兩個命令是替代用法，會各啟動一個背景實驗。腳本沿用原 Python 環境，但將訓練結果、checkpoint、log、cache 與暫存檔集中寫入 `/home/Projects/NSTC/EXTRA-DISC/Eason/tonic_nstc_csi_20261031/`；在不同機器上先調整該檔開頭的設定。
+這兩個命令是替代用法，會各啟動一個背景實驗。腳本沿用原 Python 環境，訓練結果、checkpoint、log、cache 與暫存檔集中寫入 launcher 的 `RUN_ROOT`（目前為 `/home/tonic/Projects/NSTC/EXTRA-DISC/Eason/tonic_nstc_csi_20261031`）；在不同機器上先調整該檔開頭的設定。
 
 ## 重用實驗與結果
 
@@ -106,7 +137,7 @@ raw CSI 必須有實測 timestamps、availability 與正確 subcarrier frequenci
 
 ## 共同 evaluation
 
-四個 methods 都經 `roi_experiments.evaluation`。舊 `baf_roi_heatmap.evaluation` 保留 compatibility imports。無 RF 的 standalone BAF／MT 也共用同一個 metric／report engine。
+五個 methods 都經 `roi_experiments.evaluation`。舊 `baf_roi_heatmap.evaluation` 保留 compatibility imports。無 RF 的 standalone BAF／MT 也共用同一個 metric／report engine。
 
 - 主表延續先前 PPT：**逐 origin Mean IoU**、**pooled Micro F1**，另列 precision、coverage/recall、FP/FN、selected count 與 pose error。
 - 保留 all origins 及 RF-available subset；同一 RF 子集的 baseline 也重新評估。
@@ -119,6 +150,8 @@ raw CSI 必須有實測 timestamps、availability 與正確 subcarrier frequenci
 
 | 文件 | 內容 |
 |---|---|
+| [內部 residual：本分支主方法](docs/README_INTERNAL_RESIDUAL.md) | 作用點、公式、單次 rollout、訓練、對照組與操作指令 |
+| [本分支驗證紀錄](docs/INTERNAL_RESIDUAL_VALIDATION.md) | 實際軟體驗證結果及尚未量測的項目 |
 | [共同入口與操作](docs/README_EXPERIMENTS.md) | `--method`、相依模型、cache/checkpoint 重用、輸出、繪圖 |
 | [原 heatmap 演算法](docs/README_HEATMAP_ALGORITHM.md) | AoA–ToF、因果對齊、CNN／GRU、residual、terminal expert gate |
 | [新的 alpha-only 演算法](docs/README_HEATMAP_ALPHA.md) | 簡單 RF features、161 參數 gate、真正的逐步 α fusion、訓練與 fallback |

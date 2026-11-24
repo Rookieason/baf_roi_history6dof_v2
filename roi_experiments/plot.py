@@ -23,6 +23,8 @@ def method_label(method):
     name = method.get('method', 'adapter')
     if name == 'baf_roi_heatmap_alpha':
         return 'BAF + heatmap alpha'
+    if name == 'baf_roi_heatmap_residual':
+        return 'BAF + internal residual / ' + method.get('modality', 'rf') + ' / ' + method.get('ablation', 'full')
     return ' / '.join(str(method[k]) for k in ('method', 'modality', 'ablation') if k in method)
 
 

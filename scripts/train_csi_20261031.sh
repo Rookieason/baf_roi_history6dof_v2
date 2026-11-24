@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# All four methods: bash scripts/train_csi_20261031.sh
+# All registered methods (including legacy comparisons): bash scripts/train_csi_20261031.sh
+# Main internal-residual experiment: bash scripts/train_csi_internal_residual.sh
 # One method: bash scripts/train_csi_20261031.sh --method baf_roi_heatmap_alpha
 # Shared data -> selected models -> one matched evaluation protocol.
 set -euo pipefail

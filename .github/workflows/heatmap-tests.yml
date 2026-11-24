@@ -1,7 +1,7 @@
 name: Heatmap software validation
 on:
   push:
-    branches: ['feature/csi-heatmap-fusion']
+    branches: ['feature/csi-heatmap-fusion', 'feature/csi-internal-residual']
     paths-ignore: ['docs/**', 'README*.md']
   pull_request:
     paths-ignore: ['docs/**', 'README*.md']
@@ -43,6 +43,10 @@ jobs:
         run: |
           set -o pipefail
           python scripts/smoke_heatmap.py --output /tmp/heatmap-smoke 2>&1 | tee smoke-result.txt
+      - name: Internal residual online and checkpoint validation
+        run: |
+          set -o pipefail
+          python scripts/smoke_internal_residual.py --prepared /tmp/heatmap-smoke/prepared --output /tmp/internal-residual-smoke 2>&1 | tee internal-residual-result.txt
       - name: Upload reproducible source and validation logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -53,5 +57,7 @@ jobs:
             heatmap-source.zip
             pytest-result.txt
             smoke-result.txt
+            internal-residual-result.txt
             /tmp/heatmap-smoke/smoke_result.json
             /tmp/heatmap-smoke/benchmark.json
+            /tmp/internal-residual-smoke/smoke_result.json

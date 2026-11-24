@@ -119,11 +119,11 @@ def evaluation_protocol(dataset):
 @torch.inference_mode()
 def evaluate(prepared, output, checkpoint=None, baseline='baf', split='test', device='cpu', batch_size=64,
              margins=(0.,), delivery_delay_s=0., policy_path=None, motion_transformer_checkpoint=None,
-             alpha_checkpoint=None, *, _dataset=None, _pose_predictor=None, _pose_checkpoint=None):
+             alpha_checkpoint=None, *, residual_checkpoint=None, _dataset=None, _pose_predictor=None, _pose_checkpoint=None):
     if split not in ('valid', 'test') or batch_size < 1:
         raise ValueError('Evaluation uses valid/test and a positive batch size.')
     dataset = _dataset if _dataset is not None else ForecastDataset(prepared, split, delivery_delay_s)
-    if sum(bool(p) for p in (checkpoint, motion_transformer_checkpoint, alpha_checkpoint, _pose_checkpoint)) > 1:
+    if sum(bool(p) for p in (checkpoint, motion_transformer_checkpoint, alpha_checkpoint, residual_checkpoint, _pose_checkpoint)) > 1:
         raise ValueError('Choose exactly one prediction source.')
     transformer = None
     if motion_transformer_checkpoint:
@@ -136,9 +136,13 @@ def evaluate(prepared, output, checkpoint=None, baseline='baf', split='test', de
     if alpha_checkpoint:
         from baf_roi_heatmap_alpha.runtime import load_alpha
         alpha_model, bundle = load_alpha(alpha_checkpoint, dataset, device)
+    residual_model = None
+    if residual_checkpoint:
+        from baf_roi_heatmap_residual.runtime import load_residual
+        residual_model, bundle = load_residual(residual_checkpoint, dataset, device)
     if not checkpoint and baseline not in ('baf', 'focused', 'explorer', 'fixed'):
         raise ValueError('Unknown baseline.')
-    source_checkpoint = checkpoint or motion_transformer_checkpoint or alpha_checkpoint or _pose_checkpoint
+    source_checkpoint = checkpoint or motion_transformer_checkpoint or alpha_checkpoint or residual_checkpoint or _pose_checkpoint
     method_id = file_hash(source_checkpoint) if source_checkpoint else 'frozen:' + baseline
     policy = read_json(policy_path) if policy_path else None
     if policy and (policy['experiment_id'] != dataset.manifest['experiment_id'] or policy['method_id'] != method_id
@@ -173,15 +177,23 @@ def evaluate(prepared, output, checkpoint=None, baseline='baf', split='test', de
             prediction = predictor.forecast_batch(np.stack(histories), dataset.horizons, **extras)
             p, q = prediction['positions_m'], prediction['quaternions_wxyz']
             gates = np.broadcast_to(prediction['alpha_t'][:, None], p.shape[:2]) if uses_alpha else None
-        elif model is not None or alpha_model is not None:
+        elif model is not None or alpha_model is not None or residual_model is not None:
             original_p = np.stack([dataset.arrays(int(ri))['base_p'][int(oi)] for ri, oi in zip(ris, ois)])
             original_q = np.stack([dataset.arrays(int(ri))['base_q'][int(oi)] for ri, oi in zip(ris, ois)])
-            if alpha_model is not None:
+            if residual_model is not None:
+                from baf_roi_heatmap_residual.runtime import predict_dataset_batch
+                prediction = predict_dataset_batch(residual_model, dataset, batch, device)
+            elif alpha_model is not None:
                 from baf_roi_heatmap_alpha.runtime import predict_dataset_batch
                 prediction = predict_dataset_batch(alpha_model, dataset, batch, device)
             else:
                 prediction = model(to_device(batch['inputs'], device))
-            p, q = numpy_prediction(prediction, original_p, original_q)
+            if residual_model is not None:
+                from baf_roi_heatmap_residual.runtime import reference_prediction
+                p, q = reference_prediction(residual_model, prediction,
+                                            batch['inputs']['rf_available'], original_p, original_q)
+            else:
+                p, q = numpy_prediction(prediction, original_p, original_q)
             gates = prediction['gate'].cpu().numpy()
             applied = prediction['applied'].cpu().numpy().astype(bool)
         else:
@@ -227,9 +239,9 @@ def evaluate(prepared, output, checkpoint=None, baseline='baf', split='test', de
                                  'rf_available': int(batch['inputs']['rf_available'][b]), 'gate': float(gates[b, j]) if gates is not None else None,
                                  'correction_applied': int(applied[b, j]),
                                  'gate_kind': ('none' if gates is None else
-                                               'rollout_upper_step' if alpha_model is not None and applied[b, j] else
+                                               'rollout_upper_step' if (alpha_model is not None or residual_model is not None) and applied[b, j] else
                                                'terminal_expert_mix' if model is not None and bundle['model_config']['method'] == 'expert_gate' and applied[b, j] else
-                                               'fixed_rollout_weight' if model is None and alpha_model is None and _pose_predictor is None and baseline in ('focused', 'explorer', 'fixed') else
+                                               'fixed_rollout_weight' if model is None and alpha_model is None and residual_model is None and _pose_predictor is None and baseline in ('focused', 'explorer', 'fixed') else
                                                'observed_origin_alpha'),
                                  'tp': int(tp[b, j]), 'fp': int(fp[b, j]), 'fn': int(fn[b, j]), 'tn': int(tn[b, j]),
                                  'iou': float(iou[b, j]), 'translation_error_m': float(tr[b, j]),
@@ -244,7 +256,8 @@ def evaluate(prepared, output, checkpoint=None, baseline='baf', split='test', de
                        'transition_error_mean': float(np.mean([r['transition_error'] for r in values if r['transition_error'] is not None]))
                        if any(r['transition_error'] is not None for r in values) else None} for key, values in groups.items()}
     protocol = evaluation_protocol(dataset)
-    method = ({'method': 'baf_roi_heatmap_alpha', **bundle['model_config']} if alpha_model is not None else
+    method = ({'method': 'baf_roi_heatmap_residual', **bundle['model_config']} if residual_model is not None else
+              {'method': 'baf_roi_heatmap_alpha', **bundle['model_config']} if alpha_model is not None else
               bundle.get('model_config', {}) if bundle else
               ('motion_transformer' if transformer is not None or (_pose_predictor is not None and not callable(getattr(_pose_predictor, 'confidence', None))) else baseline))
     report = {'experiment_id': dataset.manifest['experiment_id'], 'scene_id': dataset.manifest['scene']['scene_id'],
@@ -270,6 +283,8 @@ def evaluate(prepared, output, checkpoint=None, baseline='baf', split='test', de
         'aggregation': bundle.get('aggregation', 'origin'),
     } if bundle else None)
     report['correction_applied_fraction'] = float(np.mean([r['correction_applied'] for r in rows]))
+    if residual_model is not None:
+        report['architecture'] = residual_model.specification()
     write_json(out/'report.json', report)
     return report
 
